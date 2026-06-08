@@ -95,6 +95,10 @@ namespace Graphics
 
     uint32_t g_NativeWidth = 0;
     uint32_t g_NativeHeight = 0;
+    // VRTF: when nonzero, overrides the NativeResolution EnumVar so the scene can render at an
+    // arbitrary HMD per-eye size that survives Display::Present's per-frame SetNativeResolution snap.
+    uint32_t g_NativeResolutionOverrideWidth = 0;
+    uint32_t g_NativeResolutionOverrideHeight = 0;
     uint32_t g_DisplayWidth = 1920;
     uint32_t g_DisplayHeight = 1080;
     ColorBuffer g_PreDisplayBuffer;
@@ -135,7 +139,15 @@ namespace Graphics
     {
         uint32_t NativeWidth, NativeHeight;
 
-        ResolutionToUINT(eResolution((int)NativeResolution), NativeWidth, NativeHeight);
+        if (g_NativeResolutionOverrideWidth != 0 && g_NativeResolutionOverrideHeight != 0)
+        {
+            NativeWidth = g_NativeResolutionOverrideWidth;
+            NativeHeight = g_NativeResolutionOverrideHeight;
+        }
+        else
+        {
+            ResolutionToUINT(eResolution((int)NativeResolution), NativeWidth, NativeHeight);
+        }
 
         if (g_NativeWidth == NativeWidth && g_NativeHeight == NativeHeight)
             return;
