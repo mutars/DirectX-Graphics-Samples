@@ -33,6 +33,7 @@
 #include "ModelLoader.h"
 #include "ShadowCamera.h"
 #include "Display.h"
+#include "DLSS.h"
 
 #define LEGACY_RENDERER
 
@@ -350,7 +351,8 @@ void ModelViewer::RenderScene( void )
     // is necessary for all temporal effects (and motion blur).
     MotionBlur::GenerateCameraVelocityBuffer(gfxContext, m_Camera, true);
 
-    TemporalEffects::ResolveImage(gfxContext);
+    if (!(DLSS::Enable && DLSS::IsSupported()))
+        TemporalEffects::ResolveImage(gfxContext);
 
     ParticleEffectManager::Render(gfxContext, m_Camera, g_SceneColorBuffer, g_SceneDepthBuffer,  g_LinearDepth[FrameIndex]);
 

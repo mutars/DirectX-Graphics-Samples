@@ -17,6 +17,7 @@
 #include "EngineTuning.h"
 
 class ComputeContext;
+class ColorBuffer;
 
 namespace PostEffects
 {
@@ -39,7 +40,12 @@ namespace PostEffects
 
     void Initialize( void );
     void Shutdown( void );
+
+    // Render on native g_SceneColorBuffer (stock path; DLSS off). Byte-identical to original.
     void Render( void );
+
+    // Render on an explicit target (DLSS on: pass g_DLSSOutputBuffer at display res).
+    void Render( ColorBuffer& SceneColor );
 
     // Copy the contents of the post effects buffer onto the main scene buffer
     void CopyBackPostBuffer( ComputeContext& Context );

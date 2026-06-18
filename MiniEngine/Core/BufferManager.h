@@ -29,6 +29,8 @@ namespace Graphics
     extern ColorBuffer g_HorizontalBuffer;  // For separable (bicubic) upsampling
 
     extern ColorBuffer g_VelocityBuffer;    // R10G10B10  (3D velocity)
+    extern ColorBuffer g_DLSSMotionBuffer;  // RG16_FLOAT (unjittered 2D pixel-space MV for DLSS, native res)
+    extern ColorBuffer g_DLSSOutputBuffer;  // R11G11B10_FLOAT (DLSS upscaled result, display res)
     extern ShadowBuffer g_ShadowBuffer;
 
     extern ColorBuffer g_SSAOFullScreen;	// R8_UNORM

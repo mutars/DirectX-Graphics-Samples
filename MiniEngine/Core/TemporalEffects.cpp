@@ -19,6 +19,7 @@
 #include "CommandContext.h"
 #include "SystemTime.h"
 #include "PostEffects.h"
+#include "DLSS.h"
 
 #include "CompiledShaders/TemporalBlendCS.h"
 #include "CompiledShaders/BoundNeighborhoodCS.h"
@@ -81,7 +82,7 @@ void TemporalEffects::Update( uint64_t FrameIndex )
     s_FrameIndex = (uint32_t)FrameIndex;
     s_FrameIndexMod2 = s_FrameIndex % 2;
 
-    if (EnableTAA)// && !DepthOfField::Enable)
+    if (EnableTAA || (DLSS::Enable && DLSS::IsSupported()))// && !DepthOfField::Enable)
     {
         static const float Halton23[8][2] =
         {

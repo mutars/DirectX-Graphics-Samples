@@ -25,6 +25,8 @@ namespace Graphics
     ColorBuffer g_SceneNormalBuffer;
     ColorBuffer g_PostEffectsBuffer;
     ColorBuffer g_VelocityBuffer;
+    ColorBuffer g_DLSSMotionBuffer;
+    ColorBuffer g_DLSSOutputBuffer;
     ColorBuffer g_OverlayBuffer;
     ColorBuffer g_HorizontalBuffer;
 
@@ -113,6 +115,7 @@ void Graphics::InitializeRenderingBuffers( uint32_t bufferWidth, uint32_t buffer
         g_SceneColorBuffer.Create( L"Main Color Buffer", bufferWidth, bufferHeight, 1, DefaultHdrColorFormat, esram );
         g_SceneNormalBuffer.Create( L"Normals Buffer", bufferWidth, bufferHeight, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, esram );
         g_VelocityBuffer.Create( L"Motion Vectors", bufferWidth, bufferHeight, 1, DXGI_FORMAT_R32_UINT );
+        g_DLSSMotionBuffer.Create( L"DLSS Motion Vectors", bufferWidth, bufferHeight, 1, DXGI_FORMAT_R16G16_FLOAT );
         g_PostEffectsBuffer.Create( L"Post Effects Buffer", bufferWidth, bufferHeight, 1, DXGI_FORMAT_R32_UINT );
 
         esram.PushStack();	// Render HDR image
@@ -228,6 +231,7 @@ void Graphics::InitializeRenderingBuffers( uint32_t bufferWidth, uint32_t buffer
 
         g_OverlayBuffer.Create( L"UI Overlay", g_DisplayWidth, g_DisplayHeight, 1, DXGI_FORMAT_R8G8B8A8_UNORM, esram );
         g_HorizontalBuffer.Create( L"Bicubic Intermediate", g_DisplayWidth, bufferHeight, 1, DefaultHdrColorFormat, esram );
+        g_DLSSOutputBuffer.Create( L"DLSS Output", g_DisplayWidth, g_DisplayHeight, 1, DefaultHdrColorFormat );
 
     esram.PopStack(); // End final image
 
@@ -239,6 +243,7 @@ void Graphics::ResizeDisplayDependentBuffers(uint32_t NativeWidth, uint32_t Nati
     (NativeWidth);
     g_OverlayBuffer.Create( L"UI Overlay", g_DisplayWidth, g_DisplayHeight, 1, DXGI_FORMAT_R8G8B8A8_UNORM );
     g_HorizontalBuffer.Create( L"Bicubic Intermediate", g_DisplayWidth, NativeHeight, 1, DefaultHdrColorFormat );
+    g_DLSSOutputBuffer.Create( L"DLSS Output", g_DisplayWidth, g_DisplayHeight, 1, DefaultHdrColorFormat );
 }
 
 void Graphics::DestroyRenderingBuffers()
@@ -247,6 +252,8 @@ void Graphics::DestroyRenderingBuffers()
     g_SceneColorBuffer.Destroy();
     g_SceneNormalBuffer.Destroy();
     g_VelocityBuffer.Destroy();
+    g_DLSSMotionBuffer.Destroy();
+    g_DLSSOutputBuffer.Destroy();
     g_OverlayBuffer.Destroy();
     g_HorizontalBuffer.Destroy();
     g_PostEffectsBuffer.Destroy();

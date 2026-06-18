@@ -203,8 +203,11 @@ void Graphics::Initialize(bool RequireDXRSupport)
         {
             dxgiFactoryFlags = DXGI_CREATE_FACTORY_DEBUG;
 
-            dxgiInfoQueue->SetBreakOnSeverity(DXGI_DEBUG_ALL, DXGI_INFO_QUEUE_MESSAGE_SEVERITY_ERROR, true);
-            dxgiInfoQueue->SetBreakOnSeverity(DXGI_DEBUG_ALL, DXGI_INFO_QUEUE_MESSAGE_SEVERITY_CORRUPTION, true);
+            // Headless runs have no debugger attached: a break here becomes an unhandled breakpoint
+            // (STATUS_BREAKPOINT 0x80000003) that kills the process. Keep messages in the queue but
+            // do not break, so D3D errors surface as logs instead of crashing the capture run.
+            dxgiInfoQueue->SetBreakOnSeverity(DXGI_DEBUG_ALL, DXGI_INFO_QUEUE_MESSAGE_SEVERITY_ERROR, false);
+            dxgiInfoQueue->SetBreakOnSeverity(DXGI_DEBUG_ALL, DXGI_INFO_QUEUE_MESSAGE_SEVERITY_CORRUPTION, false);
 
             DXGI_INFO_QUEUE_MESSAGE_ID hide[] =
             {
@@ -264,7 +267,11 @@ void Graphics::Initialize(bool RequireDXRSupport)
                 continue;
 
             // By default, search for the adapter with the most memory because that's usually the dGPU.
-            if (desc.DedicatedVideoMemory < MaxSize)
+            // Use <= so a VRAM tie keeps the FIRST (index-0 / primary-display) adapter: some systems
+            // enumerate the same physical GPU twice (a virtual/mirror duplicate with identical VRAM but
+            // a different LUID), and the duplicate is not NGX/DLSS-capable. The strict < let the duplicate
+            // overwrite the primary on the tie.
+            if (desc.DedicatedVideoMemory <= MaxSize)
                 continue;
 
             MaxSize = desc.DedicatedVideoMemory;

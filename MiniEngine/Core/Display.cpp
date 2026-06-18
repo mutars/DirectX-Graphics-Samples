@@ -21,6 +21,7 @@
 #include "RootSignature.h"
 #include "ImageScaling.h"
 #include "TemporalEffects.h"
+#include "DLSS.h"
 
 #pragma comment(lib, "dxgi.lib") 
 
@@ -362,12 +363,14 @@ void Graphics::PreparePresentHDR(void)
 {
     GraphicsContext& Context = GraphicsContext::Begin(L"Present");
 
-    bool NeedsScaling = g_NativeWidth != g_DisplayWidth || g_NativeHeight != g_DisplayHeight;
+    const bool dlssActive = DLSS::Enable && DLSS::IsSupported();
+    ColorBuffer& PresentSource = dlssActive ? g_DLSSOutputBuffer : g_SceneColorBuffer;
+    bool NeedsScaling = dlssActive ? false : (g_NativeWidth != g_DisplayWidth || g_NativeHeight != g_DisplayHeight);
 
     Context.SetRootSignature(s_PresentRS);
     Context.SetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    Context.TransitionResource(g_SceneColorBuffer, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-    Context.SetDynamicDescriptor(0, 0, g_SceneColorBuffer.GetSRV());
+    Context.TransitionResource(PresentSource, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    Context.SetDynamicDescriptor(0, 0, PresentSource.GetSRV());
 
     ColorBuffer& Dest = DebugZoom == kDebugZoomOff ? g_DisplayPlane[g_CurrentBuffer] : g_PreDisplayBuffer;
 
@@ -430,12 +433,14 @@ void Graphics::PreparePresentSDR(void)
     Context.SetRootSignature(s_PresentRS);
     Context.SetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
-    // We're going to be reading these buffers to write to the swap chain buffer(s)
-    Context.TransitionResource(g_SceneColorBuffer, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | 
-        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-    Context.SetDynamicDescriptor(0, 0, g_SceneColorBuffer.GetSRV());
+    const bool dlssActive = DLSS::Enable && DLSS::IsSupported();
+    ColorBuffer& PresentSource = dlssActive ? g_DLSSOutputBuffer : g_SceneColorBuffer;
+    bool NeedsScaling = dlssActive ? false : (g_NativeWidth != g_DisplayWidth || g_NativeHeight != g_DisplayHeight);
 
-    bool NeedsScaling = g_NativeWidth != g_DisplayWidth || g_NativeHeight != g_DisplayHeight;
+    // We're going to be reading these buffers to write to the swap chain buffer(s)
+    Context.TransitionResource(PresentSource, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
+        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    Context.SetDynamicDescriptor(0, 0, PresentSource.GetSRV());
 
     // On Windows, prefer scaling and compositing in one step via pixel shader
     if (DebugZoom == kDebugZoomOff && (UpsampleFilter == kSharpening || !NeedsScaling))
