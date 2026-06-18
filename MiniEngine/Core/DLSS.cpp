@@ -8,9 +8,10 @@
 #include "TemporalEffects.h"
 #include "RootSignature.h"
 #include "PipelineState.h"
-
 #include "CompiledShaders/DlssMotionVectorsCS.h"
 // clang-format on
+
+#include <cstdio>
 
 using namespace Graphics;
 
@@ -250,3 +251,4 @@ bool DLSS::Resolve(CommandContext& Context, ColorBuffer& Output)
     return false;
 #endif
 }
+

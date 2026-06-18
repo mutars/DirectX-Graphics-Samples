@@ -52,4 +52,5 @@ namespace DLSS
     // IsSupported() to false) when !IsSupported() or feature-create/evaluate fails, so the caller
     // falls back to the stock present path for this and every subsequent frame.
     bool Resolve(CommandContext& Context, ColorBuffer& Output);
+
 }

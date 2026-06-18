@@ -165,6 +165,11 @@ void ModelViewer::Startup( void )
     if (CommandLineArgs::GetInteger(L"rebuild", rebuildValue))
         forceRebuild = rebuildValue != 0;
 
+    // VRTF: capture the valid scene center/radius HERE -- m_ModelInst.GetBoundingBox() is degenerate
+    // when re-queried later in Startup (after the controller is built), which the close-up block needs.
+    Vector3 vrtfSceneCenter(kZero);
+    float   vrtfSceneRadius = 0.0f;
+
     if (CommandLineArgs::GetString(L"model", gltfFileName) == false)
     {
 #ifdef LEGACY_RENDERER
@@ -176,6 +181,8 @@ void ModelViewer::Startup( void )
         float modelRadius = Length(obb.GetDimensions()) * 0.5f;
         const Vector3 eye = obb.GetCenter() + Vector3(modelRadius * 0.5f, 0.0f, 0.0f);
         m_Camera.SetEyeAtUp( eye, Vector3(kZero), Vector3(kYUnitVector) );
+        vrtfSceneCenter = obb.GetCenter();
+        vrtfSceneRadius = modelRadius;
 #endif
     }
     else
@@ -192,6 +199,31 @@ void ModelViewer::Startup( void )
         m_CameraController.reset(new FlyingFPSCamera(m_Camera, Vector3(kYUnitVector)));
     else
         m_CameraController.reset(new OrbitCamera(m_Camera, m_ModelInst.GetBoundingSphere(), Vector3(kYUnitVector)));
+
+    // VRTF test-scoped close-up (env-gated, behavior-identical when unset): move the camera much nearer
+    // the Sponza geometry so the per-eye IPD parallax -- and thus the DLSS motion-vector magnitude -- is
+    // large. dlss_aer_tests needs this to make the AER twin's cadence mis-sample visible; the camera is
+    // ~12.8 m from geometry by default, which leaves the parallax (and the ghost) sub-pixel.
+    {
+        char vrtfCloseup[64]{};
+        if (gltfFileName.size() == 0 && GetEnvironmentVariableA("VRTF_CAMERA_CLOSEUP", vrtfCloseup, sizeof(vrtfCloseup)) > 0)
+        {
+            // The model bounding box / radius is degenerate this late in Startup (async load), so use the
+            // empirically-known original eye distance as the world scale unit. The scene is centered at the
+            // origin. Eye + look-at are origin-relative fractions of D, overridable via VRTF_CAMERA_EYE /
+            // VRTF_CAMERA_AT = "x,y,z". Default ex=1 reproduces the original far view (eye at +X, look at origin).
+            constexpr float D = 1276.0f;  // = original Sponza eye distance (center + modelRadius*0.5*X)
+            float ex = 1.0f, ey = 0.0f, ez = 0.0f;
+            float ax = 0.0f, ay = 0.0f, az = 0.0f;
+            char  buf[128]{};
+            if (GetEnvironmentVariableA("VRTF_CAMERA_EYE", buf, sizeof(buf)) > 0) sscanf_s(buf, "%f,%f,%f", &ex, &ey, &ez);
+            if (GetEnvironmentVariableA("VRTF_CAMERA_AT",  buf, sizeof(buf)) > 0) sscanf_s(buf, "%f,%f,%f", &ax, &ay, &az);
+            const Vector3 eye = Vector3(ex * D, ey * D, ez * D);
+            const Vector3 at  = Vector3(ax * D, ay * D, az * D);
+            m_Camera.SetEyeAtUp(eye, at, Vector3(kYUnitVector));
+            m_CameraController.reset(new FlyingFPSCamera(m_Camera, Vector3(kYUnitVector)));
+        }
+    }
 }
 
 void ModelViewer::Cleanup( void )
