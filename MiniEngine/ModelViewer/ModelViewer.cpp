@@ -35,6 +35,8 @@
 #include "Display.h"
 #include "DLSS.h"
 
+#include "miniengine_glue/SceneHud.hpp"
+
 #define LEGACY_RENDERER
 
 using namespace GameCore;
@@ -55,6 +57,7 @@ public:
 
     virtual void Update( float deltaT ) override;
     virtual void RenderScene( void ) override;
+    virtual void RenderUI( GraphicsContext& Context ) override;
 
 private:
 
@@ -395,4 +398,9 @@ void ModelViewer::RenderScene( void )
         MotionBlur::RenderObjectBlur(gfxContext, g_VelocityBuffer);
 
     gfxContext.Finish();
+}
+
+void ModelViewer::RenderUI( GraphicsContext& Context )
+{
+    vrtf::renderSceneHud(Context, m_Camera, Sponza::GetModel());
 }
