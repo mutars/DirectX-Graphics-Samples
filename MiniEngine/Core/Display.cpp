@@ -100,6 +100,10 @@ namespace Graphics
     // arbitrary HMD per-eye size that survives Display::Present's per-frame SetNativeResolution snap.
     uint32_t g_NativeResolutionOverrideWidth = 0;
     uint32_t g_NativeResolutionOverrideHeight = 0;
+    // VRTF: direct-topology HUD tail (null = stock path). When set, PreparePresentSDR composes
+    // PresentSource into g_PreDisplayBuffer, invokes the hook so the consumer draws the HUD
+    // straight onto it, then runs a profile-neutral final output pass to the display plane.
+    void (*g_vrtfDirectTailHook)(GraphicsContext&, ColorBuffer& preDisplay) = nullptr;
     uint32_t g_DisplayWidth = 1920;
     uint32_t g_DisplayHeight = 1080;
     ColorBuffer g_PreDisplayBuffer;
@@ -270,6 +274,12 @@ void Display::Initialize(void)
 
 #if CONDITIONALLY_ENABLE_HDR_OUTPUT
     {
+        // VRTF: HUD-fixture runs force SDR -- HDR enablement is desktop-dependent (ST.2084 detect)
+        // and the fixture's direct/truth paths patch only PreparePresentSDR.
+        char vrtfHudEnv[8];
+        const bool vrtfForceSdr = GetEnvironmentVariableA("VRTF_HUD_TOPOLOGY", vrtfHudEnv, sizeof(vrtfHudEnv)) > 0
+            || GetEnvironmentVariableA("VRTF_HUD_TRUTH", vrtfHudEnv, sizeof(vrtfHudEnv)) > 0;
+
         IDXGISwapChain4* swapChain = (IDXGISwapChain4*)s_SwapChain1;
         ComPtr<IDXGIOutput> output;
         ComPtr<IDXGIOutput6> output6;
@@ -277,7 +287,8 @@ void Display::Initialize(void)
         UINT colorSpaceSupport;
 
         // Query support for ST.2084 on the display and set the color space accordingly
-        if (SUCCEEDED(swapChain->GetContainingOutput(&output)) && SUCCEEDED(output.As(&output6)) &&
+        if (!vrtfForceSdr &&
+            SUCCEEDED(swapChain->GetContainingOutput(&output)) && SUCCEEDED(output.As(&output6)) &&
             SUCCEEDED(output6->GetDesc1(&outputDesc)) && outputDesc.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020 &&
             SUCCEEDED(swapChain->CheckColorSpaceSupport(DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020, &colorSpaceSupport)) &&
             (colorSpaceSupport & DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT) &&
@@ -442,8 +453,40 @@ void Graphics::PreparePresentSDR(void)
         D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     Context.SetDynamicDescriptor(0, 0, PresentSource.GetSRV());
 
+    // VRTF: direct-topology tail. Compose PresentSource into g_PreDisplayBuffer (the ONE
+    // display-profile encode), let the hook draw the HUD onto it, then a profile-neutral point
+    // copy to the display plane. No overlay reads on this path. DebugZoom falls through to the
+    // stock path (the fixture never sets it; correctness over realism there).
+    if (g_vrtfDirectTailHook != nullptr && DebugZoom == kDebugZoomOff)
+    {
+        if (NeedsScaling)
+        {
+            ImageScaling::Upscale(Context, g_PreDisplayBuffer, g_SceneColorBuffer, eScalingFilter((int)UpsampleFilter));
+        }
+        else
+        {
+            Context.SetPipelineState(PresentSDRPS);
+            Context.TransitionResource(g_PreDisplayBuffer, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            Context.SetRenderTarget(g_PreDisplayBuffer.GetRTV());
+            Context.SetViewportAndScissor(0, 0, g_DisplayWidth, g_DisplayHeight);
+            Context.Draw(3);
+        }
+
+        g_vrtfDirectTailHook(Context, g_PreDisplayBuffer);
+
+        Context.SetRootSignature(s_PresentRS);
+        Context.SetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        Context.SetPipelineState(MagnifyPixelsPS);
+        Context.TransitionResource(g_PreDisplayBuffer, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        Context.TransitionResource(g_DisplayPlane[g_CurrentBuffer], D3D12_RESOURCE_STATE_RENDER_TARGET);
+        Context.SetRenderTarget(g_DisplayPlane[g_CurrentBuffer].GetRTV());
+        Context.SetDynamicDescriptor(0, 0, g_PreDisplayBuffer.GetSRV());
+        Context.SetViewportAndScissor(0, 0, g_DisplayWidth, g_DisplayHeight);
+        Context.SetConstants(1, 1.0f);
+        Context.Draw(3);
+    }
     // On Windows, prefer scaling and compositing in one step via pixel shader
-    if (DebugZoom == kDebugZoomOff && (UpsampleFilter == kSharpening || !NeedsScaling))
+    else if (DebugZoom == kDebugZoomOff && (UpsampleFilter == kSharpening || !NeedsScaling))
     {
         Context.TransitionResource(g_OverlayBuffer, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         Context.SetDynamicDescriptor(0, 1, g_OverlayBuffer.GetSRV());

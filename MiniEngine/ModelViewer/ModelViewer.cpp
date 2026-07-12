@@ -298,7 +298,25 @@ void ModelViewer::RenderScene( void )
     if (m_ModelInst.IsNull())
     {
 #ifdef LEGACY_RENDERER
-        Sponza::RenderScene(gfxContext, m_Camera, viewport, scissor);
+        // VRTF: ui-only scenario mode (VRTF_HUD_MODE=ui-only) skips the scene -- splash-screen
+        // analog. The skip replaces Sponza::RenderScene with its own depth+color clears (dark
+        // g_SceneColorBuffer) so the temporal/particle/DoF tail runs on valid buffers. Latch-once;
+        // unset/any other value = stock scene, byte-identical.
+        static const bool s_vrtfUiOnly = [] {
+            char b[16];
+            return GetEnvironmentVariableA("VRTF_HUD_MODE", b, sizeof(b)) > 0 && strcmp(b, "ui-only") == 0;
+        }();
+        if (s_vrtfUiOnly)
+        {
+            gfxContext.TransitionResource(g_SceneDepthBuffer, D3D12_RESOURCE_STATE_DEPTH_WRITE, true);
+            gfxContext.ClearDepth(g_SceneDepthBuffer);
+            gfxContext.TransitionResource(g_SceneColorBuffer, D3D12_RESOURCE_STATE_RENDER_TARGET, true);
+            gfxContext.ClearColor(g_SceneColorBuffer);
+        }
+        else
+        {
+            Sponza::RenderScene(gfxContext, m_Camera, viewport, scissor);
+        }
 #endif
     }
     else
