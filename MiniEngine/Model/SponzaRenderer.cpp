@@ -166,7 +166,12 @@ void Sponza::Cleanup( void )
 {
     m_Model.Clear();
     Lighting::Shutdown();
-    TextureManager::Shutdown();
+    ParticleEffects::Shutdown(); // VRTF: static TextureRefs must drop before the cache dies (see ParticleEffects.h)
+    // VRTF: TextureManager::Shutdown() removed -- Renderer::Shutdown() (which ModelViewer::Cleanup
+    // runs right after this) owns cache shutdown and nulls its IBL TextureRef globals FIRST.
+    // Clearing the cache here deletes ManagedTextures the Renderer globals still reference ->
+    // use-after-free in TextureRef::operator=(nullptr_t) on every legacy-path shutdown
+    // (intermittent 0xC0000005 child exits; deterministic under PageHeap).
 }
 
 void Sponza::RenderObjects( GraphicsContext& gfxContext, const Matrix4& ViewProjMat, const Vector3& viewerPos, eObjectFilter Filter )

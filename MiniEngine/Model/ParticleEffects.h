@@ -18,4 +18,7 @@
 namespace ParticleEffects
 {
     void InitFromJSON(const std::wstring& InitJsonFile);
+    // VRTF: releases the static particle TextureRefs BEFORE TextureManager::Shutdown --
+    // otherwise they destruct at DLL detach against an already-cleared cache (use-after-free).
+    void Shutdown(void);
 }

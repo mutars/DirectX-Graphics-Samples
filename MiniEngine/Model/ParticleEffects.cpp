@@ -61,6 +61,12 @@ namespace
     }
 }
 
+void ParticleEffects::Shutdown(void)
+{
+    s_TextureArrayLookup.clear();
+    s_TextureReferences.clear();
+}
+
 //---------------------------------------------------------------------
 //
 //	JSON Init File Handling
