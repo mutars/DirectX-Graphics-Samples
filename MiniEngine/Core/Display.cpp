@@ -245,6 +245,16 @@ void Display::Initialize(void)
 {
     ASSERT(s_SwapChain1 == nullptr, "Graphics has already been initialized");
 
+    // VRTF: reroute cells force an alpha-capable 8-bit swapchain. The default
+    // R10G10B10A2's 2-bit alpha cannot carry HUD coverage in the carve-back layer
+    // (the layer must match the HUD target's format exactly -- vr-test-framework
+    // docs/hud-detection/design/4 §0), so those cells opt into R8G8B8A8 end to end.
+    {
+        char vrtf8bit[8] = {};
+        if (GetEnvironmentVariableA("VRTF_HUD_8BIT", vrtf8bit, sizeof(vrtf8bit)) > 0 && vrtf8bit[0] == '1')
+            SwapChainFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+    }
+
     Microsoft::WRL::ComPtr<IDXGIFactory4> dxgiFactory;
     ASSERT_SUCCEEDED(CreateDXGIFactory2(0, MY_IID_PPV_ARGS(&dxgiFactory)));
 
@@ -256,7 +266,10 @@ void Display::Initialize(void)
     swapChainDesc.BufferCount = SWAP_CHAIN_BUFFER_COUNT;
     swapChainDesc.SampleDesc.Count = 1;
     swapChainDesc.SampleDesc.Quality = 0;
-    swapChainDesc.Scaling = DXGI_SCALING_NONE;
+    // VRTF: STRETCH, not NONE -- the faithful-resolution seam resizes the swapchain to the per-eye
+    // G size while the window keeps its desktop size; NONE displays an unscaled top-left CROP that
+    // hides most of the frame (HUD included). STRETCH shows the whole frame, aspect-squashed.
+    swapChainDesc.Scaling = DXGI_SCALING_STRETCH;
     swapChainDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
     swapChainDesc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
     swapChainDesc.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH;
