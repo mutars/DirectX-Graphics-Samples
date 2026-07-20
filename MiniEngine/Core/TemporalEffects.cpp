@@ -82,7 +82,19 @@ void TemporalEffects::Update( uint64_t FrameIndex )
     s_FrameIndex = (uint32_t)FrameIndex;
     s_FrameIndexMod2 = s_FrameIndex % 2;
 
-    if (EnableTAA || (DLSS::Enable && DLSS::IsSupported()))// && !DepthOfField::Enable)
+    // VRTF_RENDER_JITTER=1: force the Halton jitter walk with TAA's resolve OFF -- the render
+    // grid (depth + color, via the ModelViewer viewport origin) jitters per frame with no
+    // temporal accumulation, while the camera matrices stay clean. This is the DLSS-under-DDR
+    // capture shape for the vr-test-framework's jittered frozen-scene scenarios. Read once;
+    // default-off keeps every existing capture byte-identical.
+    static int s_VrtfForceJitter = -1;
+    if (s_VrtfForceJitter < 0)
+    {
+        char b[8] = {};
+        s_VrtfForceJitter = GetEnvironmentVariableA("VRTF_RENDER_JITTER", b, sizeof(b)) > 0 && b[0] == '1' ? 1 : 0;
+    }
+
+    if (EnableTAA || (DLSS::Enable && DLSS::IsSupported()) || s_VrtfForceJitter == 1)// && !DepthOfField::Enable)
     {
         static const float Halton23[8][2] =
         {
