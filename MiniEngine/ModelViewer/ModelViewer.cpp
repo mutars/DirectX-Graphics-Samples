@@ -298,15 +298,11 @@ void ModelViewer::RenderScene( void )
     if (m_ModelInst.IsNull())
     {
 #ifdef LEGACY_RENDERER
-        // VRTF: ui-only scenario mode (VRTF_HUD_MODE=ui-only) skips the scene -- splash-screen
-        // analog. The skip replaces Sponza::RenderScene with its own depth+color clears (dark
-        // g_SceneColorBuffer) so the temporal/particle/DoF tail runs on valid buffers. Latch-once;
-        // unset/any other value = stock scene, byte-identical.
-        static const bool s_vrtfUiOnly = [] {
-            char b[16];
-            return GetEnvironmentVariableA("VRTF_HUD_MODE", b, sizeof(b)) > 0 && strcmp(b, "ui-only") == 0;
-        }();
-        if (s_vrtfUiOnly)
+        // VRTF: ui-only scenario mode skips the scene -- splash-screen analog. The skip replaces
+        // Sponza::RenderScene with its own depth+color clears (dark g_SceneColorBuffer) so the
+        // temporal/particle/DoF tail runs on valid buffers. Read per-frame from the fixture config
+        // (seeded by VRTF_HUD_MODE); any other mode = stock scene, byte-identical.
+        if (vrtf::hudFixtureConfig().mode == VRTF_HUD_MODE_UI_ONLY)
         {
             gfxContext.TransitionResource(g_SceneDepthBuffer, D3D12_RESOURCE_STATE_DEPTH_WRITE, true);
             gfxContext.ClearDepth(g_SceneDepthBuffer);
