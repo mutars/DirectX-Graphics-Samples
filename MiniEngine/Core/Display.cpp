@@ -287,11 +287,13 @@ void Display::Initialize(void)
 
 #if CONDITIONALLY_ENABLE_HDR_OUTPUT
     {
-        // VRTF: HUD-fixture runs force SDR -- HDR enablement is desktop-dependent (ST.2084 detect)
-        // and the fixture's direct/truth paths patch only PreparePresentSDR.
-        char vrtfHudEnv[8];
-        const bool vrtfForceSdr = GetEnvironmentVariableA("VRTF_HUD_TOPOLOGY", vrtfHudEnv, sizeof(vrtfHudEnv)) > 0
-            || GetEnvironmentVariableA("VRTF_HUD_TRUTH", vrtfHudEnv, sizeof(vrtfHudEnv)) > 0;
+        // VRTF: the test engine ALWAYS forces SDR. Every exact-color oracle (reprojection
+        // markers, DDR fill, truth masks) and every blessed capture is sRGB-calibrated; with the
+        // desktop in HDR this detect flips the present path to Rec2020/PQ and silently re-encodes
+        // all captures (live 2026-08-07: Windows HDR turned three exact-color gates red while
+        // tolerance-based gates passed). The HUD fixture's direct/truth paths also patch only
+        // PreparePresentSDR.
+        const bool vrtfForceSdr = true;
 
         IDXGISwapChain4* swapChain = (IDXGISwapChain4*)s_SwapChain1;
         ComPtr<IDXGIOutput> output;
