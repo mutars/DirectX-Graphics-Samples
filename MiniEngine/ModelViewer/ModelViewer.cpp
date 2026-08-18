@@ -36,6 +36,7 @@
 #include "DLSS.h"
 
 #include "miniengine_glue/SceneHud.hpp"
+#include "miniengine_glue/DebugMesh.hpp"
 
 #define LEGACY_RENDERER
 
@@ -394,6 +395,13 @@ void ModelViewer::RenderScene( void )
             sorter.RenderMeshes(MeshSorter::kTransparent, gfxContext, globals);
         }
     }
+
+    // VRTF: in-world debug geometry. Placed after BOTH scene renderers -- this build runs the
+    // LEGACY Sponza path (m_ModelInst is null), and that path binds two RTVs, so the draw binds its
+    // own scene-color RTV + read-only DSV rather than inheriting whichever branch ran. Still ahead
+    // of the velocity/temporal tail, which must not see debug geometry. No-ops until the harness
+    // pushes vertices, so a stock run is byte-identical.
+    vrtf::renderSceneDebug(gfxContext, m_Camera);
 
     // Some systems generate a per-pixel velocity buffer to better track dynamic and skinned meshes.  Everything
     // is static in our scene, so we generate velocity from camera motion and the depth buffer.  A velocity buffer
