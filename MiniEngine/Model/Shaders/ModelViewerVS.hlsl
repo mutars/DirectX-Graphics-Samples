@@ -19,6 +19,7 @@ cbuffer VSConstants : register(b0)
     float4x4 modelToProjection;
     float4x4 modelToShadow;
     float3 ViewerPos;
+    float4x4 modelToWorld;
 };
 
 cbuffer StartVertex : register(b1)
@@ -55,15 +56,19 @@ VSOutput main(VSInput vsInput, uint vertexID : SV_VertexID)
 {
     VSOutput vsOutput;
 
+    // modelToShadow already carries the model transform, so shadowCoord stays on object positions.
+    float3 worldPos = mul(modelToWorld, float4(vsInput.position, 1.0)).xyz;
+
     vsOutput.position = mul(modelToProjection, float4(vsInput.position, 1.0));
-    vsOutput.worldPos = vsInput.position;
+    vsOutput.worldPos = worldPos;
     vsOutput.texCoord = vsInput.texcoord0;
-    vsOutput.viewDir = vsInput.position - ViewerPos;
+    vsOutput.viewDir = worldPos - ViewerPos;
     vsOutput.shadowCoord = mul(modelToShadow, float4(vsInput.position, 1.0)).xyz;
 
-    vsOutput.normal = vsInput.normal;
-    vsOutput.tangent = vsInput.tangent;
-    vsOutput.bitangent = vsInput.bitangent;
+    // Rigid transforms only -- no inverse transpose needed.
+    vsOutput.normal = mul((float3x3)modelToWorld, vsInput.normal);
+    vsOutput.tangent = mul((float3x3)modelToWorld, vsInput.tangent);
+    vsOutput.bitangent = mul((float3x3)modelToWorld, vsInput.bitangent);
 
 #if ENABLE_TRIANGLE_ID
     vsOutput.vertexID = materialIdx << 24 | (vertexID & 0xFFFF);

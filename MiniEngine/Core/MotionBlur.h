@@ -14,9 +14,13 @@
 #pragma once
 
 #include "EngineTuning.h"
+#include "VectorMath.h"
+
+#include <cstdint>
+#include <d3d12.h>
 
 // Forward declarations
-namespace Math { class Matrix4; class Camera; }
+namespace Math { class Camera; }
 class ColorBuffer;
 class CommandContext;
 
@@ -24,11 +28,39 @@ namespace MotionBlur
 {
     extern BoolVar Enable;
 
+    // One DrawIndexed against the geometry buffers carried by VelocityGeometry.
+    struct VelocityRange
+    {
+        uint32_t indexCount;
+        uint32_t startIndex;
+        int32_t baseVertex;
+    };
+
+    struct VelocityObject
+    {
+        Math::Matrix4 world;
+        Math::Matrix4 prevWorld;
+        const VelocityRange* ranges;
+        uint32_t rangeCount;
+    };
+
+    // POSITION must be a float3 at vertex offset 0; one vertex/index buffer pair is shared by
+    // every object, which is why the ranges carry the per-object baseVertex/startIndex.
+    struct VelocityGeometry
+    {
+        D3D12_VERTEX_BUFFER_VIEW vertexBuffer;
+        D3D12_INDEX_BUFFER_VIEW indexBuffer;
+        const VelocityObject* objects;
+        uint32_t objectCount;
+    };
+
     void Initialize( void );
     void Shutdown( void );
 
     void GenerateCameraVelocityBuffer( CommandContext& Context, const Math::Camera& camera, bool UseLinearZ = true );
     void GenerateCameraVelocityBuffer( CommandContext& Context, const Math::Matrix4& reprojectionMatrix, float nearClip, float farClip, bool UseLinearZ = true);
+    void GenerateCameraVelocityBuffer( CommandContext& Context, const Math::Camera& camera, bool UseLinearZ,
+        const VelocityGeometry& dynamic, const D3D12_VIEWPORT& viewport, const D3D12_RECT& scissor );
 
     // Generate motion blur only associated with the camera.  Does not handle fast-moving objects well, but
     // does not require a full screen velocity buffer.

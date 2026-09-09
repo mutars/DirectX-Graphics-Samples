@@ -14,6 +14,10 @@
 #pragma once
 
 #include <d3d12.h>
+#include <cstdint>
+
+#include "../Core/MotionBlur.h"
+#include "../Core/Math/BoundingBox.h"
 
 class GraphicsContext;
 class ShadowCamera;
@@ -23,12 +27,12 @@ class ExpVar;
 namespace Math
 {
     class Camera;
-    class Vector3;
 }
 
 namespace Sponza
 {
     void Startup( Math::Camera& camera );
+    void Update( float deltaT );
     void Cleanup( void );
 
     void RenderScene(
@@ -40,6 +44,18 @@ namespace Sponza
         bool skipShadowMap = false );
 
     const ModelH3D& GetModel();
+
+    MotionBlur::VelocityGeometry DynamicGeometry();
+
+    struct DynamicObjectView
+    {
+        const char* name;
+        Math::Matrix4 world;
+        Math::AxisAlignedBox bounds;
+    };
+
+    uint32_t DynamicObjectCount();
+    DynamicObjectView DynamicObject( uint32_t index );
 
     extern Math::Vector3 m_SunDirection;
     extern ShadowCamera m_SunShadow;

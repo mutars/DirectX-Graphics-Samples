@@ -36,6 +36,10 @@
 #include "CompiledShaders/ModelViewerVS.h"
 #include "CompiledShaders/ModelViewerPS.h"
 
+#include <cmath>
+#include <cstdlib>
+#include <unordered_map>
+
 using namespace Math;
 using namespace Graphics;
 
@@ -45,6 +49,46 @@ namespace Sponza
 
     enum eObjectFilter { kOpaque = 0x1, kCutout = 0x2, kTransparent = 0x4, kAll = 0xF, kNone = 0x0 };
     void RenderObjects( GraphicsContext& Context, const Matrix4& ViewProjMat, const Vector3& viewerPos, eObjectFilter Filter = kAll );
+
+    void BuildDynamicObjects( void );
+
+    enum eDynamicObject { kVase = 0, kHangingPlanter = 1, kDynamicObjectCount };
+
+    struct DynamicObjectState
+    {
+        const char* name = nullptr;
+        AxisAlignedBox selection;
+        Vector3 pivot = Vector3(kZero);
+        AxisAlignedBox bounds;
+        std::vector<MotionBlur::VelocityRange> ranges;
+        Matrix4 world = Matrix4(kIdentity);
+        Matrix4 prevWorld = Matrix4(kIdentity);
+    };
+
+    // A contiguous slice of one mesh's index range that belongs to a dynamic object; the rest of
+    // the mesh keeps drawing with the identity model matrix.
+    struct MeshSplit
+    {
+        uint32_t startIndex;
+        uint32_t indexCount;
+        uint32_t objectIndex;
+    };
+
+    std::vector<DynamicObjectState> m_DynamicObjects;
+    std::vector<std::vector<MeshSplit>> m_MeshSplits;
+    std::vector<MotionBlur::VelocityObject> m_VelocityObjects;
+    float m_SceneTime = 0.0f;
+
+    // Constant-speed shapes throughout: a sinusoid would pass through zero once a cycle, and no
+    // per-tick speed floor can hold across that stall. The planter carries a twist on top of its
+    // cone because a cone's SCREEN-projected speed still passes near zero twice per cycle, where
+    // the circle turns through the view axis and every vertex stalls at once.
+    const float kVaseSpinRate = 10.0f;
+    const float kVaseSlideRadius = 15.0f;
+    const float kVaseSlideRate = 3.0f;
+    const float kSwingTilt = 0.35f;
+    const float kSwingRate = 7.0f;
+    const float kPlanterTwistRate = 10.0f;
 
     GraphicsPSO m_DepthPSO = { (L"Sponza: Depth PSO") };
     GraphicsPSO m_CutoutDepthPSO = { (L"Sponza: Cutout Depth PSO") };
@@ -131,6 +175,8 @@ void Sponza::Startup( Camera& Camera )
     ASSERT(m_Model.Load(L"Sponza/sponza.h3d"), "Failed to load model");
     ASSERT(m_Model.GetMeshCount() > 0, "Model contains no meshes");
 
+    BuildDynamicObjects();
+
     // The caller of this function can override which materials are considered cutouts
     m_pMaterialIsCutout.resize(m_Model.GetMaterialCount());
     for (uint32_t i = 0; i < m_Model.GetMaterialCount(); ++i)
@@ -162,8 +208,283 @@ const ModelH3D& Sponza::GetModel()
     return Sponza::m_Model;
 }
 
+namespace
+{
+    struct WeldKey
+    {
+        int32_t x, y, z;
+        bool operator==(const WeldKey& other) const { return x == other.x && y == other.y && z == other.z; }
+    };
+
+    struct WeldKeyHash
+    {
+        size_t operator()(const WeldKey& key) const
+        {
+            size_t hash = 1469598103934665603ull;
+            const int32_t components[3] = { key.x, key.y, key.z };
+            for (int32_t component : components)
+            {
+                hash ^= (size_t)(uint32_t)component;
+                hash *= 1099511628211ull;
+            }
+            return hash;
+        }
+    };
+
+    bool BoxContains(const AxisAlignedBox& outer, const AxisAlignedBox& inner)
+    {
+        const Vector3 lo = inner.GetMin() - outer.GetMin();
+        const Vector3 hi = outer.GetMax() - inner.GetMax();
+        return (float)lo.GetX() >= 0.0f && (float)lo.GetY() >= 0.0f && (float)lo.GetZ() >= 0.0f
+            && (float)hi.GetX() >= 0.0f && (float)hi.GetY() >= 0.0f && (float)hi.GetZ() >= 0.0f;
+    }
+}
+
+void Sponza::BuildDynamicObjects( void )
+{
+    m_DynamicObjects.clear();
+    m_DynamicObjects.resize(kDynamicObjectCount);
+    m_MeshSplits.clear();
+    m_MeshSplits.resize(m_Model.GetMeshCount());
+    m_VelocityObjects.clear();
+    m_SceneTime = 0.0f;
+
+    m_DynamicObjects[kVase].name = "vase_round";
+    m_DynamicObjects[kVase].selection = AxisAlignedBox(Vector3(800.0f, -10.0f, -255.0f), Vector3(870.0f, 60.0f, -195.0f));
+    m_DynamicObjects[kHangingPlanter].name = "hanging_planter";
+    m_DynamicObjects[kHangingPlanter].selection = AxisAlignedBox(Vector3(440.0f, 90.0f, -260.0f), Vector3(540.0f, 222.0f, -180.0f));
+
+    const uint32_t VertexStride = m_Model.GetVertexStride();
+
+    for (uint32_t meshIndex = 0; meshIndex < m_Model.GetMeshCount(); ++meshIndex)
+    {
+        const ModelH3D::Mesh& mesh = m_Model.GetMesh(meshIndex);
+
+        ASSERT(mesh.indexCount % 3 == 0, "Sponza mesh index stream is not a triangle list");
+
+        const uint16_t* indices = (const uint16_t*)(m_Model.m_pIndexData + mesh.indexDataByteOffset);
+        const unsigned char* positions = m_Model.m_pVertexData + mesh.vertexDataByteOffset + mesh.attrib[ModelH3D::attrib_position].offset;
+
+        std::vector<uint32_t> parent(mesh.vertexCount);
+        for (uint32_t vertex = 0; vertex < mesh.vertexCount; ++vertex)
+            parent[vertex] = vertex;
+
+        auto find = [&parent](uint32_t vertex)
+        {
+            while (parent[vertex] != vertex)
+            {
+                parent[vertex] = parent[parent[vertex]];
+                vertex = parent[vertex];
+            }
+            return vertex;
+        };
+
+        // Union by lowest index, so the representative of a component does not depend on the order
+        // the triangles happen to be walked.
+        auto unite = [&parent, &find](uint32_t a, uint32_t b)
+        {
+            a = find(a);
+            b = find(b);
+            if (a < b)
+                parent[b] = a;
+            else if (b < a)
+                parent[a] = b;
+        };
+
+        // Position weld: the exporter splits vertices at normal/UV seams, so two triangles of one
+        // object share an edge only after the duplicates are re-joined by position.
+        std::unordered_map<WeldKey, uint32_t, WeldKeyHash> weld;
+        weld.reserve(mesh.vertexCount);
+        for (uint32_t vertex = 0; vertex < mesh.vertexCount; ++vertex)
+        {
+            const float* position = (const float*)(positions + vertex * mesh.vertexStride);
+            const WeldKey key = { (int32_t)lroundf(position[0] * 100.0f), (int32_t)lroundf(position[1] * 100.0f), (int32_t)lroundf(position[2] * 100.0f) };
+            const auto existing = weld.find(key);
+            if (existing == weld.end())
+                weld.emplace(key, vertex);
+            else
+                unite(existing->second, vertex);
+        }
+
+        for (uint32_t i = 0; i + 2 < mesh.indexCount; i += 3)
+        {
+            ASSERT(indices[i] < mesh.vertexCount && indices[i + 1] < mesh.vertexCount && indices[i + 2] < mesh.vertexCount,
+                "Sponza mesh index is out of range for its vertex block");
+            unite(indices[i], indices[i + 1]);
+            unite(indices[i], indices[i + 2]);
+        }
+
+        std::unordered_map<uint32_t, AxisAlignedBox> componentBounds;
+        for (uint32_t i = 0; i + 2 < mesh.indexCount; i += 3)
+        {
+            AxisAlignedBox& bounds = componentBounds[find(indices[i])];
+            for (uint32_t corner = 0; corner < 3; ++corner)
+            {
+                const float* position = (const float*)(positions + indices[i + corner] * mesh.vertexStride);
+                bounds.AddPoint(Vector3(position[0], position[1], position[2]));
+            }
+        }
+
+        std::unordered_map<uint32_t, uint32_t> selectedRoots;
+        for (const auto& entry : componentBounds)
+        {
+            for (uint32_t objectIndex = 0; objectIndex < m_DynamicObjects.size(); ++objectIndex)
+            {
+                DynamicObjectState& object = m_DynamicObjects[objectIndex];
+                if (!BoxContains(object.selection, entry.second))
+                    continue;
+
+                selectedRoots.emplace(entry.first, objectIndex);
+                object.bounds.AddBoundingBox(entry.second);
+                break;
+            }
+        }
+
+        // A merged mesh may interleave the triangles of several components, so a selected component
+        // is emitted as one range per contiguous run of its triangles, not one range per component.
+        const uint32_t meshStartIndex = mesh.indexDataByteOffset / (uint32_t)sizeof(uint16_t);
+        const int32_t meshBaseVertex = (int32_t)(mesh.vertexDataByteOffset / VertexStride);
+
+        bool runOpen = false;
+        uint32_t runRoot = 0;
+        uint32_t runObject = 0;
+        uint32_t runStart = 0;
+        uint32_t runEnd = 0;
+
+        auto closeRun = [&]()
+        {
+            if (!runOpen)
+                return;
+            m_DynamicObjects[runObject].ranges.push_back({ runEnd - runStart, meshStartIndex + runStart, meshBaseVertex });
+            m_MeshSplits[meshIndex].push_back({ meshStartIndex + runStart, runEnd - runStart, runObject });
+            runOpen = false;
+        };
+
+        for (uint32_t i = 0; i + 2 < mesh.indexCount; i += 3)
+        {
+            const uint32_t root = find(indices[i]);
+            const auto selected = selectedRoots.find(root);
+
+            if (runOpen && (selected == selectedRoots.end() || root != runRoot || runEnd != i))
+                closeRun();
+
+            if (selected == selectedRoots.end())
+                continue;
+
+            if (!runOpen)
+            {
+                runOpen = true;
+                runRoot = root;
+                runObject = selected->second;
+                runStart = i;
+            }
+            runEnd = i + 3;
+        }
+        closeRun();
+    }
+
+    // ASSERT compiles out in non-Debug, and a silently missing object would make the velocity pass
+    // pass vacuously, so the empty case is also a hard failure in every configuration.
+    for (const DynamicObjectState& object : m_DynamicObjects)
+    {
+        ASSERT(!object.ranges.empty(), "Dynamic object selection box matched no geometry");
+        if (object.ranges.empty())
+        {
+            printf("  [dyn] FATAL %s selected no geometry -- sponza.h3d changed\n", object.name);
+            fflush(stdout);
+            std::abort();
+        }
+    }
+
+    m_DynamicObjects[kVase].pivot = m_DynamicObjects[kVase].bounds.GetCenter();
+
+    // The planter hangs from its chains, so it swings about the top of its own bounds.
+    const AxisAlignedBox& planterBounds = m_DynamicObjects[kHangingPlanter].bounds;
+    m_DynamicObjects[kHangingPlanter].pivot = Vector3(
+        (float)planterBounds.GetCenter().GetX(),
+        (float)planterBounds.GetMax().GetY(),
+        (float)planterBounds.GetCenter().GetZ());
+
+    m_VelocityObjects.reserve(m_DynamicObjects.size());
+    for (const DynamicObjectState& object : m_DynamicObjects)
+    {
+        uint32_t triangles = 0;
+        for (const MotionBlur::VelocityRange& range : object.ranges)
+            triangles += range.indexCount / 3;
+
+        // VRTF: raw printf, not Utility::Printf -- this is a stdout witness the harness reads, and
+        // Utility::Print routes to OutputDebugString unless _CONSOLE is defined, which it is not here.
+        printf("  [dyn] %s ranges=%u tris=%u bounds=(%.1f,%.1f,%.1f)..(%.1f,%.1f,%.1f)\n",
+            object.name, (uint32_t)object.ranges.size(), triangles,
+            (float)object.bounds.GetMin().GetX(), (float)object.bounds.GetMin().GetY(), (float)object.bounds.GetMin().GetZ(),
+            (float)object.bounds.GetMax().GetX(), (float)object.bounds.GetMax().GetY(), (float)object.bounds.GetMax().GetZ());
+
+        m_VelocityObjects.push_back({ object.world, object.prevWorld, object.ranges.data(), (uint32_t)object.ranges.size() });
+    }
+}
+
+void Sponza::Update( float deltaT )
+{
+    if (m_DynamicObjects.empty())
+        return;
+
+    for (DynamicObjectState& object : m_DynamicObjects)
+        object.prevWorld = object.world;
+
+    m_SceneTime += deltaT;
+
+    DynamicObjectState& vase = m_DynamicObjects[kVase];
+    const float slideAngle = kVaseSlideRate * m_SceneTime;
+    const Vector3 slide(kVaseSlideRadius * sinf(slideAngle), 0.0f, kVaseSlideRadius * (1.0f - cosf(slideAngle)));
+    vase.world = Matrix4(AffineTransform::MakeTranslation(vase.pivot + slide))
+        * Matrix4(AffineTransform::MakeYRotation(kVaseSpinRate * m_SceneTime))
+        * Matrix4(AffineTransform::MakeTranslation(-vase.pivot));
+
+    // Conical swing, so the bowl circles at constant tangential speed instead of stalling at a
+    // swing extreme. Deliberately not the identity at t=0: the planter hangs tilted when frozen.
+    DynamicObjectState& planter = m_DynamicObjects[kHangingPlanter];
+    planter.world = Matrix4(AffineTransform::MakeTranslation(planter.pivot))
+        * Matrix4(AffineTransform::MakeYRotation(kSwingRate * m_SceneTime))
+        * Matrix4(AffineTransform::MakeXRotation(kSwingTilt))
+        * Matrix4(AffineTransform::MakeYRotation(kPlanterTwistRate * m_SceneTime))
+        * Matrix4(AffineTransform::MakeTranslation(-planter.pivot));
+
+    for (size_t objectIndex = 0; objectIndex < m_DynamicObjects.size(); ++objectIndex)
+    {
+        m_VelocityObjects[objectIndex].world = m_DynamicObjects[objectIndex].world;
+        m_VelocityObjects[objectIndex].prevWorld = m_DynamicObjects[objectIndex].prevWorld;
+    }
+}
+
+MotionBlur::VelocityGeometry Sponza::DynamicGeometry()
+{
+    MotionBlur::VelocityGeometry geometry;
+    geometry.vertexBuffer = m_Model.GetVertexBuffer();
+    geometry.indexBuffer = m_Model.GetIndexBuffer();
+    geometry.objects = m_VelocityObjects.data();
+    geometry.objectCount = (uint32_t)m_VelocityObjects.size();
+    return geometry;
+}
+
+uint32_t Sponza::DynamicObjectCount()
+{
+    return (uint32_t)m_DynamicObjects.size();
+}
+
+Sponza::DynamicObjectView Sponza::DynamicObject( uint32_t index )
+{
+    ASSERT(index < m_DynamicObjects.size());
+    const DynamicObjectState& object = m_DynamicObjects[index];
+    return { object.name, object.world, object.bounds };
+}
+
 void Sponza::Cleanup( void )
 {
+    m_DynamicObjects.clear();
+    m_MeshSplits.clear();
+    m_VelocityObjects.clear();
+    m_SceneTime = 0.0f;
+
     m_Model.Clear();
     Lighting::Shutdown();
     ParticleEffects::Shutdown(); // VRTF: static TextureRefs must drop before the cache dies (see ParticleEffects.h)
@@ -181,12 +502,32 @@ void Sponza::RenderObjects( GraphicsContext& gfxContext, const Matrix4& ViewProj
         Matrix4 modelToProjection;
         Matrix4 modelToShadow;
         XMFLOAT3 viewerPos;
+        Matrix4 modelToWorld;
     } vsConstants;
-    vsConstants.modelToProjection = ViewProjMat;
-    vsConstants.modelToShadow = m_SunShadow.GetShadowMatrix();
-    XMStoreFloat3(&vsConstants.viewerPos, viewerPos);
 
-    gfxContext.SetDynamicConstantBufferView(Renderer::kMeshConstants, sizeof(vsConstants), &vsConstants);
+    const Matrix4 identity(kIdentity);
+    bool dynamicConstants = false;
+
+    auto upload = [&](const Matrix4& world)
+    {
+        vsConstants.modelToProjection = ViewProjMat * world;
+        vsConstants.modelToShadow = m_SunShadow.GetShadowMatrix() * world;
+        vsConstants.modelToWorld = world;
+        XMStoreFloat3(&vsConstants.viewerPos, viewerPos);
+        gfxContext.SetDynamicConstantBufferView(Renderer::kMeshConstants, sizeof(vsConstants), &vsConstants);
+    };
+
+    auto drawStatic = [&](uint32_t indexCount, uint32_t startIndex, uint32_t baseVertex)
+    {
+        if (dynamicConstants)
+        {
+            upload(identity);
+            dynamicConstants = false;
+        }
+        gfxContext.DrawIndexed(indexCount, startIndex, baseVertex);
+    };
+
+    upload(identity);
 
     __declspec(align(16)) uint32_t materialIdx = 0xFFFFFFFFul;
 
@@ -212,7 +553,21 @@ void Sponza::RenderObjects( GraphicsContext& gfxContext, const Matrix4& ViewProj
             gfxContext.SetDynamicConstantBufferView(Renderer::kCommonCBV, sizeof(uint32_t), &materialIdx);
         }
 
-        gfxContext.DrawIndexed(indexCount, startIndex, baseVertex);
+        uint32_t cursor = startIndex;
+        for (const MeshSplit& split : m_MeshSplits[meshIndex])
+        {
+            if (split.startIndex > cursor)
+                drawStatic(split.startIndex - cursor, cursor, baseVertex);
+
+            upload(m_DynamicObjects[split.objectIndex].world);
+            dynamicConstants = true;
+            gfxContext.DrawIndexed(split.indexCount, split.startIndex, baseVertex);
+
+            cursor = split.startIndex + split.indexCount;
+        }
+
+        if (cursor < startIndex + indexCount)
+            drawStatic(startIndex + indexCount - cursor, cursor, baseVertex);
     }
 }
 

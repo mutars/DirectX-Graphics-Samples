@@ -60,6 +60,9 @@ public:
     virtual void RenderScene( void ) override;
     virtual void RenderUI( GraphicsContext& Context ) override;
 
+    // VRTF: the glue layer reads the live per-eye camera out of the app instance.
+    Math::Camera& VrtfCamera() { return m_Camera; }
+
 private:
 
     Camera m_Camera;
@@ -259,6 +262,10 @@ void ModelViewer::Update( float deltaT )
 
     m_CameraController->Update(deltaT);
 
+#ifdef LEGACY_RENDERER
+    Sponza::Update(deltaT);
+#endif
+
     GraphicsContext& gfxContext = GraphicsContext::Begin(L"Scene Update");
 
     m_ModelInst.Update(gfxContext, deltaT);
@@ -403,10 +410,15 @@ void ModelViewer::RenderScene( void )
     // pushes vertices, so a stock run is byte-identical.
     vrtf::renderSceneDebug(gfxContext, m_Camera);
 
-    // Some systems generate a per-pixel velocity buffer to better track dynamic and skinned meshes.  Everything
-    // is static in our scene, so we generate velocity from camera motion and the depth buffer.  A velocity buffer
-    // is necessary for all temporal effects (and motion blur).
-    MotionBlur::GenerateCameraVelocityBuffer(gfxContext, m_Camera, true);
+    // Camera motion plus the depth buffer covers the static scene; the legacy Sponza path adds a
+    // rasterized pass for its animated objects, whose motion the depth buffer cannot express.
+    // A velocity buffer is necessary for all temporal effects (and motion blur).
+#ifdef LEGACY_RENDERER
+    if (m_ModelInst.IsNull())
+        MotionBlur::GenerateCameraVelocityBuffer(gfxContext, m_Camera, true, Sponza::DynamicGeometry(), viewport, scissor);
+    else
+#endif
+        MotionBlur::GenerateCameraVelocityBuffer(gfxContext, m_Camera, true);
 
     if (!(DLSS::Enable && DLSS::IsSupported()))
         TemporalEffects::ResolveImage(gfxContext);

@@ -22,6 +22,8 @@
 #include "TemporalEffects.h"
 #include "PostEffects.h"
 #include "SystemTime.h"
+#include "RootSignature.h"
+#include "PipelineState.h"
 
 #include "CompiledShaders/ScreenQuadCommonVS.h"
 #include "CompiledShaders/CameraMotionBlurPrePassCS.h"
@@ -32,6 +34,8 @@
 #include "CompiledShaders/CameraVelocityCS.h"
 #include "CompiledShaders/TemporalBlendCS.h"
 #include "CompiledShaders/BoundNeighborhoodCS.h"
+#include "CompiledShaders/ObjectVelocityVS.h"
+#include "CompiledShaders/ObjectVelocityPS.h"
 
 using namespace Graphics;
 using namespace Math;
@@ -45,6 +49,9 @@ namespace MotionBlur
     ComputePSO s_MotionBlurFinalPassCS(L"Motion Blur: Motion Blur Final Pass CS");
     GraphicsPSO s_MotionBlurFinalPassPS(L"Motion Blur: Motion Blur Final Pass PS");
     ComputePSO s_CameraVelocityCS[2] = { { L"Motion Blur: Camera Velocity CS" },{ L"Motion Blur: Camera Velocity Linear Z CS" } };
+
+    RootSignature s_ObjectVelocityRS;
+    GraphicsPSO s_ObjectVelocityPSO(L"Motion Blur: Object Velocity PSO");
 }
 
 void MotionBlur::Initialize( void )
@@ -80,6 +87,28 @@ void MotionBlur::Initialize( void )
     CreatePSO( s_CameraVelocityCS[1], g_pCameraVelocityCS );
 
 #undef CreatePSO
+
+    s_ObjectVelocityRS.Reset(1, 0);
+    s_ObjectVelocityRS[0].InitAsConstantBuffer(0, D3D12_SHADER_VISIBILITY_ALL);
+    s_ObjectVelocityRS.Finalize(L"Motion Blur: Object Velocity", D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
+
+    const D3D12_INPUT_ELEMENT_DESC objectVelocityVertElem[] =
+    {
+        { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 }
+    };
+
+    // Two-sided to match the cutout Z pre-pass, which is the only reason a back face can own a
+    // depth value this pass has to test EQUAL against.
+    s_ObjectVelocityPSO.SetRootSignature(s_ObjectVelocityRS);
+    s_ObjectVelocityPSO.SetRasterizerState(RasterizerTwoSided);
+    s_ObjectVelocityPSO.SetBlendState(BlendDisable);
+    s_ObjectVelocityPSO.SetDepthStencilState(DepthStateTestEqual);
+    s_ObjectVelocityPSO.SetInputLayout(_countof(objectVelocityVertElem), objectVelocityVertElem);
+    s_ObjectVelocityPSO.SetPrimitiveTopologyType(D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE);
+    s_ObjectVelocityPSO.SetRenderTargetFormat(g_VelocityBuffer.GetFormat(), g_SceneDepthBuffer.GetFormat());
+    s_ObjectVelocityPSO.SetVertexShader(g_pObjectVelocityVS, sizeof(g_pObjectVelocityVS));
+    s_ObjectVelocityPSO.SetPixelShader(g_pObjectVelocityPS, sizeof(g_pObjectVelocityPS));
+    s_ObjectVelocityPSO.Finalize();
 }
 
 void MotionBlur::Shutdown( void )
@@ -140,6 +169,62 @@ void MotionBlur::GenerateCameraVelocityBuffer( CommandContext& BaseContext, cons
     Context.SetDynamicDescriptor(1, 0, UseLinearZ ? LinearDepth.GetSRV() : g_SceneDepthBuffer.GetDepthSRV());
     Context.SetDynamicDescriptor(2, 0, g_VelocityBuffer.GetUAV());
     Context.Dispatch2D(Width, Height);
+}
+
+void MotionBlur::GenerateCameraVelocityBuffer( CommandContext& BaseContext, const Camera& camera, bool UseLinearZ,
+    const VelocityGeometry& dynamic, const D3D12_VIEWPORT& viewport, const D3D12_RECT& scissor )
+{
+    GenerateCameraVelocityBuffer(BaseContext, camera, UseLinearZ);
+
+    if (dynamic.objectCount == 0)
+        return;
+
+    GraphicsContext& Context = BaseContext.GetGraphicsContext();
+
+    Context.TransitionResource(g_VelocityBuffer, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    Context.TransitionResource(g_SceneDepthBuffer, D3D12_RESOURCE_STATE_DEPTH_READ);
+    Context.SetRenderTarget(g_VelocityBuffer.GetRTV(), g_SceneDepthBuffer.GetDSV_DepthReadOnly());
+    Context.SetViewportAndScissor(viewport, scissor);
+
+    Context.SetRootSignature(s_ObjectVelocityRS);
+    Context.SetPipelineState(s_ObjectVelocityPSO);
+    Context.SetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    Context.SetVertexBuffer(0, dynamic.vertexBuffer);
+    Context.SetIndexBuffer(dynamic.indexBuffer);
+
+    __declspec(align(16)) struct
+    {
+        Matrix4 curWVP;
+        Matrix4 prevWVP;
+        float viewportSize[4];
+        float zParams[4];
+    } vsConstants;
+
+    const float Width = (float)g_SceneColorBuffer.GetWidth();
+    const float Height = (float)g_SceneColorBuffer.GetHeight();
+    vsConstants.viewportSize[0] = Width;
+    vsConstants.viewportSize[1] = Height;
+    vsConstants.viewportSize[2] = 1.0f / Width;
+    vsConstants.viewportSize[3] = 1.0f / Height;
+    vsConstants.zParams[0] = (camera.GetFarClip() - camera.GetNearClip()) / camera.GetNearClip();
+    vsConstants.zParams[1] = UseLinearZ ? 1.0f : 0.0f;
+    vsConstants.zParams[2] = 0.0f;
+    vsConstants.zParams[3] = 0.0f;
+
+    for (uint32_t objectIndex = 0; objectIndex < dynamic.objectCount; ++objectIndex)
+    {
+        const VelocityObject& object = dynamic.objects[objectIndex];
+
+        vsConstants.curWVP = camera.GetViewProjMatrix() * object.world;
+        vsConstants.prevWVP = camera.GetPreviousViewProjMatrix() * object.prevWorld;
+        Context.SetDynamicConstantBufferView(0, sizeof(vsConstants), &vsConstants);
+
+        for (uint32_t rangeIndex = 0; rangeIndex < object.rangeCount; ++rangeIndex)
+        {
+            const VelocityRange& range = object.ranges[rangeIndex];
+            Context.DrawIndexed(range.indexCount, range.startIndex, range.baseVertex);
+        }
+    }
 }
 
 
