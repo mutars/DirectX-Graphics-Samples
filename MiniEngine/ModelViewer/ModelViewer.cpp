@@ -412,13 +412,16 @@ void ModelViewer::RenderScene( void )
 
     // Camera motion plus the depth buffer covers the static scene; the legacy Sponza path adds a
     // rasterized pass for its animated objects, whose motion the depth buffer cannot express.
-    // A velocity buffer is necessary for all temporal effects (and motion blur).
+    // A velocity buffer is necessary for all temporal effects (and motion blur). The two-frame
+    // buffer is produced on every path: Sponza's dynamic geometry is empty when Sponza is not the
+    // scene, and the pass then reduces to the camera term.
 #ifdef LEGACY_RENDERER
     if (m_ModelInst.IsNull())
         MotionBlur::GenerateCameraVelocityBuffer(gfxContext, m_Camera, true, Sponza::DynamicGeometry(), viewport, scissor);
     else
 #endif
         MotionBlur::GenerateCameraVelocityBuffer(gfxContext, m_Camera, true);
+    MotionBlur::GenerateTwoFrameVelocityBuffer(gfxContext, m_Camera, true, Sponza::DynamicGeometry(), viewport, scissor);
 
     if (!(DLSS::Enable && DLSS::IsSupported()))
         TemporalEffects::ResolveImage(gfxContext);

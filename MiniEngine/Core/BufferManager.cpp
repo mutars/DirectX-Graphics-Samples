@@ -25,7 +25,9 @@ namespace Graphics
     ColorBuffer g_SceneNormalBuffer;
     ColorBuffer g_PostEffectsBuffer;
     ColorBuffer g_VelocityBuffer;
+    ColorBuffer g_VelocityBuffer2;
     ColorBuffer g_DLSSMotionBuffer;
+    ColorBuffer g_TwoFrameMotionBuffer;
     ColorBuffer g_DLSSOutputBuffer;
     ColorBuffer g_OverlayBuffer;
     ColorBuffer g_HorizontalBuffer;
@@ -115,7 +117,9 @@ void Graphics::InitializeRenderingBuffers( uint32_t bufferWidth, uint32_t buffer
         g_SceneColorBuffer.Create( L"Main Color Buffer", bufferWidth, bufferHeight, 1, DefaultHdrColorFormat, esram );
         g_SceneNormalBuffer.Create( L"Normals Buffer", bufferWidth, bufferHeight, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, esram );
         g_VelocityBuffer.Create( L"Motion Vectors", bufferWidth, bufferHeight, 1, DXGI_FORMAT_R32_UINT );
+        g_VelocityBuffer2.Create( L"Motion Vectors Two-Frame", bufferWidth, bufferHeight, 1, DXGI_FORMAT_R32_UINT );
         g_DLSSMotionBuffer.Create( L"DLSS Motion Vectors", bufferWidth, bufferHeight, 1, DXGI_FORMAT_R16G16_FLOAT );
+        g_TwoFrameMotionBuffer.Create( L"Two-Frame Motion Vectors", bufferWidth, bufferHeight, 1, DXGI_FORMAT_R16G16_FLOAT );
         g_PostEffectsBuffer.Create( L"Post Effects Buffer", bufferWidth, bufferHeight, 1, DXGI_FORMAT_R32_UINT );
 
         esram.PushStack();	// Render HDR image
@@ -252,7 +256,9 @@ void Graphics::DestroyRenderingBuffers()
     g_SceneColorBuffer.Destroy();
     g_SceneNormalBuffer.Destroy();
     g_VelocityBuffer.Destroy();
+    g_VelocityBuffer2.Destroy();
     g_DLSSMotionBuffer.Destroy();
+    g_TwoFrameMotionBuffer.Destroy();
     g_DLSSOutputBuffer.Destroy();
     g_OverlayBuffer.Destroy();
     g_HorizontalBuffer.Destroy();

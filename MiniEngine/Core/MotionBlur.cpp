@@ -36,6 +36,7 @@
 #include "CompiledShaders/BoundNeighborhoodCS.h"
 #include "CompiledShaders/ObjectVelocityVS.h"
 #include "CompiledShaders/ObjectVelocityPS.h"
+#include "CompiledShaders/DlssMotionVectorsCS.h"
 
 using namespace Graphics;
 using namespace Math;
@@ -52,6 +53,17 @@ namespace MotionBlur
 
     RootSignature s_ObjectVelocityRS;
     GraphicsPSO s_ObjectVelocityPSO(L"Motion Blur: Object Velocity PSO");
+
+    ComputePSO s_DlssMotionVectorsCS(L"DLSS: Motion Vectors CS");
+
+    // alignas(16): ComputeContext::SetDynamicConstantBufferView ASSERTs the source pointer is
+    // 16-byte aligned (root CBV requirement). An all-float struct is only 4-byte aligned on the stack.
+    struct alignas(16) DlssMVCB
+    {
+        float JitterDeltaX;
+        float JitterDeltaY;
+        float _pad[2];
+    };
 }
 
 void MotionBlur::Initialize( void )
@@ -85,6 +97,7 @@ void MotionBlur::Initialize( void )
     CreatePSO( s_MotionBlurPrePassCS, g_pMotionBlurPrePassCS );
     CreatePSO( s_CameraVelocityCS[0], g_pCameraVelocityCS );
     CreatePSO( s_CameraVelocityCS[1], g_pCameraVelocityCS );
+    CreatePSO( s_DlssMotionVectorsCS, g_pDlssMotionVectorsCS );
 
 #undef CreatePSO
 
@@ -120,6 +133,114 @@ void MotionBlur::Shutdown( void )
 // hyperbolic Z for the reprojection.  Nevertheless, the reduced bandwidth and decompress eliminate
 // make Linear Z the better choice.  (The choice also lets you evict the depth buffer from ESRAM.)
 
+namespace MotionBlur
+{
+    namespace
+    {
+        enum class VelocityHistory { PreviousFrame, TwoFramesBack };
+
+        void DispatchCameraVelocity( CommandContext& BaseContext, const Matrix4& reprojectionMatrix, float nearClip, float farClip,
+            bool UseLinearZ, ColorBuffer& target )
+        {
+            ComputeContext& Context = BaseContext.GetComputeContext();
+
+            Context.SetRootSignature(g_CommonRS);
+
+            uint32_t Width = g_SceneColorBuffer.GetWidth();
+            uint32_t Height = g_SceneColorBuffer.GetHeight();
+
+            float RcpHalfDimX = 2.0f / Width;
+            float RcpHalfDimY = 2.0f / Height;
+            float RcpZMagic = nearClip / (farClip - nearClip);
+
+            Matrix4 preMult = Matrix4(
+                Vector4( RcpHalfDimX, 0.0f, 0.0f, 0.0f ),
+                Vector4( 0.0f, -RcpHalfDimY, 0.0f, 0.0f),
+                Vector4( 0.0f, 0.0f, UseLinearZ ? RcpZMagic : 1.0f, 0.0f ),
+                Vector4( -1.0f, 1.0f, UseLinearZ ? -RcpZMagic : 0.0f, 1.0f )
+            );
+
+            Matrix4 postMult = Matrix4(
+                Vector4( 1.0f / RcpHalfDimX, 0.0f, 0.0f, 0.0f ),
+                Vector4( 0.0f, -1.0f / RcpHalfDimY, 0.0f, 0.0f ),
+                Vector4( 0.0f, 0.0f, 1.0f, 0.0f ),
+                Vector4( 1.0f / RcpHalfDimX, 1.0f / RcpHalfDimY, 0.0f, 1.0f ) );
+
+
+            Matrix4 CurToPrevXForm = postMult * reprojectionMatrix * preMult;
+
+            Context.SetDynamicConstantBufferView(3, sizeof(CurToPrevXForm), &CurToPrevXForm);
+            Context.TransitionResource(target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+            ColorBuffer& LinearDepth = g_LinearDepth[ TemporalEffects::GetFrameIndexMod2() ];
+            if (UseLinearZ)
+                Context.TransitionResource(LinearDepth, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            else
+                Context.TransitionResource(g_SceneDepthBuffer, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+            Context.SetPipelineState(s_CameraVelocityCS[UseLinearZ ? 1 : 0]);
+            Context.SetDynamicDescriptor(1, 0, UseLinearZ ? LinearDepth.GetSRV() : g_SceneDepthBuffer.GetDepthSRV());
+            Context.SetDynamicDescriptor(2, 0, target.GetUAV());
+            Context.Dispatch2D(Width, Height);
+        }
+
+        void RenderObjectVelocity( CommandContext& BaseContext, const Camera& camera, bool UseLinearZ,
+            const VelocityGeometry& dynamic, const D3D12_VIEWPORT& viewport, const D3D12_RECT& scissor,
+            ColorBuffer& target, VelocityHistory history )
+        {
+            GraphicsContext& Context = BaseContext.GetGraphicsContext();
+
+            Context.TransitionResource(target, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            Context.TransitionResource(g_SceneDepthBuffer, D3D12_RESOURCE_STATE_DEPTH_READ);
+            Context.SetRenderTarget(target.GetRTV(), g_SceneDepthBuffer.GetDSV_DepthReadOnly());
+            Context.SetViewportAndScissor(viewport, scissor);
+
+            Context.SetRootSignature(s_ObjectVelocityRS);
+            Context.SetPipelineState(s_ObjectVelocityPSO);
+            Context.SetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            Context.SetVertexBuffer(0, dynamic.vertexBuffer);
+            Context.SetIndexBuffer(dynamic.indexBuffer);
+
+            __declspec(align(16)) struct
+            {
+                Matrix4 curWVP;
+                Matrix4 prevWVP;
+                float viewportSize[4];
+                float zParams[4];
+            } vsConstants;
+
+            const float Width = (float)g_SceneColorBuffer.GetWidth();
+            const float Height = (float)g_SceneColorBuffer.GetHeight();
+            vsConstants.viewportSize[0] = Width;
+            vsConstants.viewportSize[1] = Height;
+            vsConstants.viewportSize[2] = 1.0f / Width;
+            vsConstants.viewportSize[3] = 1.0f / Height;
+            vsConstants.zParams[0] = (camera.GetFarClip() - camera.GetNearClip()) / camera.GetNearClip();
+            vsConstants.zParams[1] = UseLinearZ ? 1.0f : 0.0f;
+            vsConstants.zParams[2] = 0.0f;
+            vsConstants.zParams[3] = 0.0f;
+
+            const bool twoFrame = history == VelocityHistory::TwoFramesBack;
+            const Matrix4& prevViewProj = twoFrame ? camera.GetPrevPrevViewProjMatrix() : camera.GetPreviousViewProjMatrix();
+
+            for (uint32_t objectIndex = 0; objectIndex < dynamic.objectCount; ++objectIndex)
+            {
+                const VelocityObject& object = dynamic.objects[objectIndex];
+
+                vsConstants.curWVP = camera.GetViewProjMatrix() * object.world;
+                vsConstants.prevWVP = prevViewProj * (twoFrame ? object.prevPrevWorld : object.prevWorld);
+                Context.SetDynamicConstantBufferView(0, sizeof(vsConstants), &vsConstants);
+
+                for (uint32_t rangeIndex = 0; rangeIndex < object.rangeCount; ++rangeIndex)
+                {
+                    const VelocityRange& range = object.ranges[rangeIndex];
+                    Context.DrawIndexed(range.indexCount, range.startIndex, range.baseVertex);
+                }
+            }
+        }
+    }
+}
+
 void MotionBlur::GenerateCameraVelocityBuffer( CommandContext& BaseContext, const Camera& camera, bool UseLinearZ )
 {
     GenerateCameraVelocityBuffer(BaseContext, camera.GetReprojectionMatrix(), camera.GetNearClip(), camera.GetFarClip(), UseLinearZ);
@@ -129,46 +250,7 @@ void MotionBlur::GenerateCameraVelocityBuffer( CommandContext& BaseContext, cons
 {
     ScopedTimer _prof(L"Generate Camera Velocity", BaseContext);
 
-    ComputeContext& Context = BaseContext.GetComputeContext();
-
-    Context.SetRootSignature(g_CommonRS);
-
-    uint32_t Width = g_SceneColorBuffer.GetWidth();
-    uint32_t Height = g_SceneColorBuffer.GetHeight();
-
-    float RcpHalfDimX = 2.0f / Width;
-    float RcpHalfDimY = 2.0f / Height;
-    float RcpZMagic = nearClip / (farClip - nearClip);
-
-    Matrix4 preMult = Matrix4(
-        Vector4( RcpHalfDimX, 0.0f, 0.0f, 0.0f ),
-        Vector4( 0.0f, -RcpHalfDimY, 0.0f, 0.0f),
-        Vector4( 0.0f, 0.0f, UseLinearZ ? RcpZMagic : 1.0f, 0.0f ),
-        Vector4( -1.0f, 1.0f, UseLinearZ ? -RcpZMagic : 0.0f, 1.0f )
-    );
-
-    Matrix4 postMult = Matrix4(
-        Vector4( 1.0f / RcpHalfDimX, 0.0f, 0.0f, 0.0f ),
-        Vector4( 0.0f, -1.0f / RcpHalfDimY, 0.0f, 0.0f ),
-        Vector4( 0.0f, 0.0f, 1.0f, 0.0f ),
-        Vector4( 1.0f / RcpHalfDimX, 1.0f / RcpHalfDimY, 0.0f, 1.0f ) );
-
-
-    Matrix4 CurToPrevXForm = postMult * reprojectionMatrix * preMult;
-
-    Context.SetDynamicConstantBufferView(3, sizeof(CurToPrevXForm), &CurToPrevXForm);
-    Context.TransitionResource(g_VelocityBuffer, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-
-    ColorBuffer& LinearDepth = g_LinearDepth[ TemporalEffects::GetFrameIndexMod2() ];
-    if (UseLinearZ)
-        Context.TransitionResource(LinearDepth, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-    else
-        Context.TransitionResource(g_SceneDepthBuffer, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-
-    Context.SetPipelineState(s_CameraVelocityCS[UseLinearZ ? 1 : 0]);
-    Context.SetDynamicDescriptor(1, 0, UseLinearZ ? LinearDepth.GetSRV() : g_SceneDepthBuffer.GetDepthSRV());
-    Context.SetDynamicDescriptor(2, 0, g_VelocityBuffer.GetUAV());
-    Context.Dispatch2D(Width, Height);
+    DispatchCameraVelocity(BaseContext, reprojectionMatrix, nearClip, farClip, UseLinearZ, g_VelocityBuffer);
 }
 
 void MotionBlur::GenerateCameraVelocityBuffer( CommandContext& BaseContext, const Camera& camera, bool UseLinearZ,
@@ -179,52 +261,46 @@ void MotionBlur::GenerateCameraVelocityBuffer( CommandContext& BaseContext, cons
     if (dynamic.objectCount == 0)
         return;
 
-    GraphicsContext& Context = BaseContext.GetGraphicsContext();
+    RenderObjectVelocity(BaseContext, camera, UseLinearZ, dynamic, viewport, scissor,
+        g_VelocityBuffer, VelocityHistory::PreviousFrame);
+}
 
-    Context.TransitionResource(g_VelocityBuffer, D3D12_RESOURCE_STATE_RENDER_TARGET);
-    Context.TransitionResource(g_SceneDepthBuffer, D3D12_RESOURCE_STATE_DEPTH_READ);
-    Context.SetRenderTarget(g_VelocityBuffer.GetRTV(), g_SceneDepthBuffer.GetDSV_DepthReadOnly());
-    Context.SetViewportAndScissor(viewport, scissor);
+void MotionBlur::GenerateTwoFrameVelocityBuffer( CommandContext& BaseContext, const Camera& camera, bool UseLinearZ,
+    const VelocityGeometry& dynamic, const D3D12_VIEWPORT& viewport, const D3D12_RECT& scissor )
+{
+    ScopedTimer _prof(L"Generate Two-Frame Velocity", BaseContext);
 
-    Context.SetRootSignature(s_ObjectVelocityRS);
-    Context.SetPipelineState(s_ObjectVelocityPSO);
-    Context.SetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    Context.SetVertexBuffer(0, dynamic.vertexBuffer);
-    Context.SetIndexBuffer(dynamic.indexBuffer);
+    DispatchCameraVelocity(BaseContext, camera.GetReprojectionMatrix2(), camera.GetNearClip(), camera.GetFarClip(),
+        UseLinearZ, g_VelocityBuffer2);
 
-    __declspec(align(16)) struct
-    {
-        Matrix4 curWVP;
-        Matrix4 prevWVP;
-        float viewportSize[4];
-        float zParams[4];
-    } vsConstants;
+    if (dynamic.objectCount != 0)
+        RenderObjectVelocity(BaseContext, camera, UseLinearZ, dynamic, viewport, scissor,
+            g_VelocityBuffer2, VelocityHistory::TwoFramesBack);
 
-    const float Width = (float)g_SceneColorBuffer.GetWidth();
-    const float Height = (float)g_SceneColorBuffer.GetHeight();
-    vsConstants.viewportSize[0] = Width;
-    vsConstants.viewportSize[1] = Height;
-    vsConstants.viewportSize[2] = 1.0f / Width;
-    vsConstants.viewportSize[3] = 1.0f / Height;
-    vsConstants.zParams[0] = (camera.GetFarClip() - camera.GetNearClip()) / camera.GetNearClip();
-    vsConstants.zParams[1] = UseLinearZ ? 1.0f : 0.0f;
-    vsConstants.zParams[2] = 0.0f;
-    vsConstants.zParams[3] = 0.0f;
+    RepackMotionVectors(BaseContext, g_VelocityBuffer2, g_TwoFrameMotionBuffer, 0.0f, 0.0f);
+}
 
-    for (uint32_t objectIndex = 0; objectIndex < dynamic.objectCount; ++objectIndex)
-    {
-        const VelocityObject& object = dynamic.objects[objectIndex];
+void MotionBlur::RepackMotionVectors( CommandContext& BaseContext, ColorBuffer& src, ColorBuffer& dst, float jitterDeltaX, float jitterDeltaY )
+{
+    ComputeContext& Context = BaseContext.GetComputeContext();
 
-        vsConstants.curWVP = camera.GetViewProjMatrix() * object.world;
-        vsConstants.prevWVP = camera.GetPreviousViewProjMatrix() * object.prevWorld;
-        Context.SetDynamicConstantBufferView(0, sizeof(vsConstants), &vsConstants);
+    Context.SetRootSignature(g_CommonRS);
+    Context.SetPipelineState(s_DlssMotionVectorsCS);
 
-        for (uint32_t rangeIndex = 0; rangeIndex < object.rangeCount; ++rangeIndex)
-        {
-            const VelocityRange& range = object.ranges[rangeIndex];
-            Context.DrawIndexed(range.indexCount, range.startIndex, range.baseVertex);
-        }
-    }
+    DlssMVCB cb{ jitterDeltaX, jitterDeltaY, { 0.0f, 0.0f } };
+    Context.SetDynamicConstantBufferView(3, sizeof(cb), &cb);
+
+    Context.TransitionResource(src, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    Context.TransitionResource(dst, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    Context.FlushResourceBarriers();
+
+    // g_CommonRS: slot 1 = SRV (t0-t9), slot 2 = UAV (u0-u9)
+    Context.SetDynamicDescriptor(1, 0, src.GetSRV());
+    Context.SetDynamicDescriptor(2, 0, dst.GetUAV());
+
+    Context.Dispatch2D(src.GetWidth(), src.GetHeight());
+
+    Context.TransitionResource(dst, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 }
 
 

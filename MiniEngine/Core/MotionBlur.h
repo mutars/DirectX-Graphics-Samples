@@ -40,6 +40,7 @@ namespace MotionBlur
     {
         Math::Matrix4 world;
         Math::Matrix4 prevWorld;
+        Math::Matrix4 prevPrevWorld;
         const VelocityRange* ranges;
         uint32_t rangeCount;
     };
@@ -61,6 +62,17 @@ namespace MotionBlur
     void GenerateCameraVelocityBuffer( CommandContext& Context, const Math::Matrix4& reprojectionMatrix, float nearClip, float farClip, bool UseLinearZ = true);
     void GenerateCameraVelocityBuffer( CommandContext& Context, const Math::Camera& camera, bool UseLinearZ,
         const VelocityGeometry& dynamic, const D3D12_VIEWPORT& viewport, const D3D12_RECT& scissor );
+
+    // The same stage reprojected from frame N-2 instead of N-1, into g_VelocityBuffer2, and repacked
+    // into g_TwoFrameMotionBuffer.  Leaves g_VelocityBuffer and everything the one-frame path feeds
+    // untouched.
+    void GenerateTwoFrameVelocityBuffer( CommandContext& Context, const Math::Camera& camera, bool UseLinearZ,
+        const VelocityGeometry& dynamic, const D3D12_VIEWPORT& viewport, const D3D12_RECT& scissor );
+
+    // Unpack a packed R32_UINT velocity buffer into RG16_FLOAT pixel-space motion vectors, removing
+    // the given jitter delta.  Lives here because this is the module that packs them.
+    void RepackMotionVectors( CommandContext& Context, ColorBuffer& src, ColorBuffer& dst,
+        float jitterDeltaX, float jitterDeltaY );
 
     // Generate motion blur only associated with the camera.  Does not handle fast-moving objects well, but
     // does not require a full screen velocity buffer.

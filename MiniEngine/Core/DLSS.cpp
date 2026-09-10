@@ -6,9 +6,7 @@
 #include "CommandContext.h"
 #include "BufferManager.h"
 #include "TemporalEffects.h"
-#include "RootSignature.h"
-#include "PipelineState.h"
-#include "CompiledShaders/DlssMotionVectorsCS.h"
+#include "MotionBlur.h"
 // clang-format on
 
 #include <cstdio>
@@ -60,17 +58,6 @@ namespace DLSS
     static uint32_t s_LastDisplayH = 0;
     static int      s_LastQuality  = -1;
     static bool     s_NeedsReset   = true;
-
-    static ComputePSO s_DlssMotionVectorsCS(L"DLSS: Motion Vectors CS");
-
-    // alignas(16): ComputeContext::SetDynamicConstantBufferView ASSERTs the source pointer is
-    // 16-byte aligned (root CBV requirement). An all-float struct is only 4-byte aligned on the stack.
-    struct alignas(16) DlssMVCB
-    {
-        float JitterDeltaX;
-        float JitterDeltaY;
-        float _pad[2];
-    };
 }
 
 void DLSS::Initialize(void)
@@ -78,10 +65,6 @@ void DLSS::Initialize(void)
     if (s_Initialized)
         return;
     s_Initialized = true;
-
-    s_DlssMotionVectorsCS.SetRootSignature(g_CommonRS);
-    s_DlssMotionVectorsCS.SetComputeShader(g_pDlssMotionVectorsCS, sizeof(g_pDlssMotionVectorsCS));
-    s_DlssMotionVectorsCS.Finalize();
 
 #if defined(VRTF_HAVE_NGX)
     s_Shim = LoadLibraryA("ngx_shim.dll");
@@ -183,26 +166,9 @@ bool DLSS::Resolve(CommandContext& Context, ColorBuffer& Output)
     const float jitterPixX = jitterX - 0.5f;
     const float jitterPixY = jitterY - 0.5f;
 
-    {
-        ComputeContext& cc = Context.GetComputeContext();
-        cc.SetRootSignature(g_CommonRS);
-        cc.SetPipelineState(s_DlssMotionVectorsCS);
-
-        // MiniEngine's g_VelocityBuffer is built from the unjittered reprojection matrix (jitter is a
-        // viewport offset, not in the matrix), so it is already jitter-free — do not subtract jitter.
-        DlssMVCB cb{ 0.0f, 0.0f, 0.0f, 0.0f };
-        cc.SetDynamicConstantBufferView(3, sizeof(cb), &cb);
-
-        cc.TransitionResource(g_VelocityBuffer, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-        cc.TransitionResource(g_DLSSMotionBuffer, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        cc.FlushResourceBarriers();
-
-        // g_CommonRS: slot 1 = SRV (t0-t9), slot 2 = UAV (u0-u9)
-        cc.SetDynamicDescriptor(1, 0, g_VelocityBuffer.GetSRV());
-        cc.SetDynamicDescriptor(2, 0, g_DLSSMotionBuffer.GetUAV());
-
-        cc.Dispatch2D(renderW, renderH);
-    }
+    // MiniEngine's g_VelocityBuffer is built from the unjittered reprojection matrix (jitter is a
+    // viewport offset, not in the matrix), so it is already jitter-free — do not subtract jitter.
+    MotionBlur::RepackMotionVectors(Context, g_VelocityBuffer, g_DLSSMotionBuffer, 0.0f, 0.0f);
 
     // NGX reads color/depth/MV as non-pixel SRVs and writes Output as a UAV. Set those states on
     // MiniEngine's command list; the shim then records the NGX create/evaluate onto the same list.

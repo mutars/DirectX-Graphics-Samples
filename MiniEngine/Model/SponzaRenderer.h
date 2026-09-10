@@ -35,6 +35,11 @@ namespace Sponza
     void Update( float deltaT );
     void Cleanup( void );
 
+    // Restart the animation clock at the t=0 pose with a settled history, so callers whose warm-up
+    // length differs can measure at the same orbit phase. The first tick after it carries zero
+    // object motion and the second zero two-frame motion.
+    void ResetSceneTime( void );
+
     void RenderScene(
         GraphicsContext& gfxContext,
         const Math::Camera& camera,

@@ -51,18 +51,22 @@ namespace Sponza
     void RenderObjects( GraphicsContext& Context, const Matrix4& ViewProjMat, const Vector3& viewerPos, eObjectFilter Filter = kAll );
 
     void BuildDynamicObjects( void );
+    void PoseDynamicObjects( void );
+    void MirrorVelocityObjects( void );
 
-    enum eDynamicObject { kVase = 0, kHangingPlanter = 1, kDynamicObjectCount };
+    enum eDynamicObject { kVaseSpinning = 0, kVaseSteady, kVaseOccluded, kPlanterOscillating, kDynamicObjectCount };
 
     struct DynamicObjectState
     {
         const char* name = nullptr;
         AxisAlignedBox selection;
         Vector3 pivot = Vector3(kZero);
+        Vector3 placement = Vector3(kZero);
         AxisAlignedBox bounds;
         std::vector<MotionBlur::VelocityRange> ranges;
         Matrix4 world = Matrix4(kIdentity);
         Matrix4 prevWorld = Matrix4(kIdentity);
+        Matrix4 prevPrevWorld = Matrix4(kIdentity);
     };
 
     // A contiguous slice of one mesh's index range that belongs to a dynamic object; the rest of
@@ -80,15 +84,20 @@ namespace Sponza
     float m_SceneTime = 0.0f;
 
     // Constant-speed shapes throughout: a sinusoid would pass through zero once a cycle, and no
-    // per-tick speed floor can hold across that stall. The planter carries a twist on top of its
-    // cone because a cone's SCREEN-projected speed still passes near zero twice per cycle, where
-    // the circle turns through the view axis and every vertex stalls at once.
+    // per-tick speed floor can hold across that stall.
     const float kVaseSpinRate = 10.0f;
-    const float kVaseSlideRadius = 15.0f;
+    const float kVaseSlideRadius = 3.0f;
     const float kVaseSlideRate = 3.0f;
-    const float kSwingTilt = 0.35f;
-    const float kSwingRate = 7.0f;
-    const float kPlanterTwistRate = 10.0f;
+    const float kSteadyVaseRadius = 40.0f;
+    const float kSteadyVaseRate = -1.0f;
+    const float kOccludedVaseRadius = 30.0f;
+    const float kOccludedVaseRate = 1.5f;
+
+    // The planter is the deliberate exception: its phase advances exactly pi per fixed 1/90 s tick,
+    // so world(N-2) == world(N) and the two-frame object term is identically zero. COSINE, not sine:
+    // m_SceneTime starts at 0, so sin(N*pi) is 0 at every tick and the planter would never move.
+    const float kPlanterSwingAmplitude = 0.0035f;
+    const float kPlanterSwingRate = 3.14159265f * 90.0f;
 
     GraphicsPSO m_DepthPSO = { (L"Sponza: Depth PSO") };
     GraphicsPSO m_CutoutDepthPSO = { (L"Sponza: Cutout Depth PSO") };
@@ -249,10 +258,20 @@ void Sponza::BuildDynamicObjects( void )
     m_VelocityObjects.clear();
     m_SceneTime = 0.0f;
 
-    m_DynamicObjects[kVase].name = "vase_round";
-    m_DynamicObjects[kVase].selection = AxisAlignedBox(Vector3(800.0f, -10.0f, -255.0f), Vector3(870.0f, 60.0f, -195.0f));
-    m_DynamicObjects[kHangingPlanter].name = "hanging_planter";
-    m_DynamicObjects[kHangingPlanter].selection = AxisAlignedBox(Vector3(440.0f, 90.0f, -260.0f), Vector3(540.0f, 222.0f, -180.0f));
+    // `placement` moves a selected object away from its authored spot, so the fixture can frame all
+    // four from one camera with the occluded one behind a column. Offsets are target centre minus
+    // the authored bowl centre; the planter keeps its authored spot.
+    m_DynamicObjects[kVaseSpinning].name = "vase_spinning";
+    m_DynamicObjects[kVaseSpinning].selection = AxisAlignedBox(Vector3(800.0f, -10.0f, -255.0f), Vector3(870.0f, 60.0f, -195.0f));
+    m_DynamicObjects[kVaseSpinning].placement = Vector3(-213.00f, -0.12f, 136.55f);
+    m_DynamicObjects[kVaseSteady].name = "vase_steady";
+    m_DynamicObjects[kVaseSteady].selection = AxisAlignedBox(Vector3(90.0f, -10.0f, -255.0f), Vector3(150.0f, 60.0f, -195.0f));
+    m_DynamicObjects[kVaseSteady].placement = Vector3(390.75f, 14.88f, 41.55f);
+    m_DynamicObjects[kVaseOccluded].name = "vase_occluded";
+    m_DynamicObjects[kVaseOccluded].selection = AxisAlignedBox(Vector3(800.0f, -10.0f, 120.0f), Vector3(870.0f, 60.0f, 190.0f));
+    m_DynamicObjects[kVaseOccluded].placement = Vector3(-329.60f, 3.22f, -195.15f);
+    m_DynamicObjects[kPlanterOscillating].name = "planter_oscillating";
+    m_DynamicObjects[kPlanterOscillating].selection = AxisAlignedBox(Vector3(440.0f, 90.0f, -260.0f), Vector3(540.0f, 222.0f, -180.0f));
 
     const uint32_t VertexStride = m_Model.GetVertexStride();
 
@@ -396,11 +415,12 @@ void Sponza::BuildDynamicObjects( void )
         }
     }
 
-    m_DynamicObjects[kVase].pivot = m_DynamicObjects[kVase].bounds.GetCenter();
+    for (const eDynamicObject vase : { kVaseSpinning, kVaseSteady, kVaseOccluded })
+        m_DynamicObjects[vase].pivot = m_DynamicObjects[vase].bounds.GetCenter();
 
     // The planter hangs from its chains, so it swings about the top of its own bounds.
-    const AxisAlignedBox& planterBounds = m_DynamicObjects[kHangingPlanter].bounds;
-    m_DynamicObjects[kHangingPlanter].pivot = Vector3(
+    const AxisAlignedBox& planterBounds = m_DynamicObjects[kPlanterOscillating].bounds;
+    m_DynamicObjects[kPlanterOscillating].pivot = Vector3(
         (float)planterBounds.GetCenter().GetX(),
         (float)planterBounds.GetMax().GetY(),
         (float)planterBounds.GetCenter().GetZ());
@@ -419,8 +439,73 @@ void Sponza::BuildDynamicObjects( void )
             (float)object.bounds.GetMin().GetX(), (float)object.bounds.GetMin().GetY(), (float)object.bounds.GetMin().GetZ(),
             (float)object.bounds.GetMax().GetX(), (float)object.bounds.GetMax().GetY(), (float)object.bounds.GetMax().GetZ());
 
-        m_VelocityObjects.push_back({ object.world, object.prevWorld, object.ranges.data(), (uint32_t)object.ranges.size() });
+        m_VelocityObjects.push_back({ object.world, object.prevWorld, object.prevPrevWorld, object.ranges.data(), (uint32_t)object.ranges.size() });
     }
+
+    // The objects are authored at the origin and moved by `placement`, so leaving world at the
+    // identity here would make the first rendered frame carry the whole offset as one teleport.
+    ResetSceneTime();
+}
+
+void Sponza::PoseDynamicObjects( void )
+{
+    // Displacement around a circle that leaves the placed spot along +z, shared by all three vases:
+    // the fixture camera looks down -x, so an x-first phase spends the measured window moving along
+    // the view axis and projects to almost no pixels. Zero at t=0, so `placement` IS the t=0 centre.
+    auto slideOffset = [](float radius, float angle)
+    {
+        return Vector3(radius * (1.0f - cosf(angle)), 0.0f, radius * sinf(angle));
+    };
+
+    // Constant screen speed with no stall at an extreme.
+    auto orbit = [&slideOffset](DynamicObjectState& object, float radius, float rate)
+    {
+        object.world = Matrix4(AffineTransform::MakeTranslation(object.placement + slideOffset(radius, rate * m_SceneTime)));
+    };
+
+    DynamicObjectState& spinning = m_DynamicObjects[kVaseSpinning];
+    const Vector3 slide = slideOffset(kVaseSlideRadius, kVaseSlideRate * m_SceneTime);
+    spinning.world = Matrix4(AffineTransform::MakeTranslation(spinning.placement + spinning.pivot + slide))
+        * Matrix4(AffineTransform::MakeYRotation(kVaseSpinRate * m_SceneTime))
+        * Matrix4(AffineTransform::MakeTranslation(-spinning.pivot));
+
+    orbit(m_DynamicObjects[kVaseSteady], kSteadyVaseRadius, kSteadyVaseRate);
+    orbit(m_DynamicObjects[kVaseOccluded], kOccludedVaseRadius, kOccludedVaseRate);
+
+    // Swings about the top of its own bounds, so it is not the identity at t=0: the planter hangs
+    // tilted when frozen.
+    DynamicObjectState& planter = m_DynamicObjects[kPlanterOscillating];
+    planter.world = Matrix4(AffineTransform::MakeTranslation(planter.placement + planter.pivot))
+        * Matrix4(AffineTransform::MakeXRotation(kPlanterSwingAmplitude * cosf(kPlanterSwingRate * m_SceneTime)))
+        * Matrix4(AffineTransform::MakeTranslation(-planter.pivot));
+}
+
+void Sponza::MirrorVelocityObjects( void )
+{
+    ASSERT(m_VelocityObjects.size() == m_DynamicObjects.size(), "Velocity objects must mirror the dynamic objects one to one");
+    for (size_t objectIndex = 0; objectIndex < m_DynamicObjects.size(); ++objectIndex)
+    {
+        m_VelocityObjects[objectIndex].world = m_DynamicObjects[objectIndex].world;
+        m_VelocityObjects[objectIndex].prevWorld = m_DynamicObjects[objectIndex].prevWorld;
+        m_VelocityObjects[objectIndex].prevPrevWorld = m_DynamicObjects[objectIndex].prevPrevWorld;
+    }
+}
+
+void Sponza::ResetSceneTime( void )
+{
+    if (m_DynamicObjects.empty())
+        return;
+
+    m_SceneTime = 0.0f;
+    PoseDynamicObjects();
+
+    for (DynamicObjectState& object : m_DynamicObjects)
+    {
+        object.prevWorld = object.world;
+        object.prevPrevWorld = object.world;
+    }
+
+    MirrorVelocityObjects();
 }
 
 void Sponza::Update( float deltaT )
@@ -429,31 +514,15 @@ void Sponza::Update( float deltaT )
         return;
 
     for (DynamicObjectState& object : m_DynamicObjects)
+    {
+        object.prevPrevWorld = object.prevWorld;
         object.prevWorld = object.world;
+    }
 
     m_SceneTime += deltaT;
 
-    DynamicObjectState& vase = m_DynamicObjects[kVase];
-    const float slideAngle = kVaseSlideRate * m_SceneTime;
-    const Vector3 slide(kVaseSlideRadius * sinf(slideAngle), 0.0f, kVaseSlideRadius * (1.0f - cosf(slideAngle)));
-    vase.world = Matrix4(AffineTransform::MakeTranslation(vase.pivot + slide))
-        * Matrix4(AffineTransform::MakeYRotation(kVaseSpinRate * m_SceneTime))
-        * Matrix4(AffineTransform::MakeTranslation(-vase.pivot));
-
-    // Conical swing, so the bowl circles at constant tangential speed instead of stalling at a
-    // swing extreme. Deliberately not the identity at t=0: the planter hangs tilted when frozen.
-    DynamicObjectState& planter = m_DynamicObjects[kHangingPlanter];
-    planter.world = Matrix4(AffineTransform::MakeTranslation(planter.pivot))
-        * Matrix4(AffineTransform::MakeYRotation(kSwingRate * m_SceneTime))
-        * Matrix4(AffineTransform::MakeXRotation(kSwingTilt))
-        * Matrix4(AffineTransform::MakeYRotation(kPlanterTwistRate * m_SceneTime))
-        * Matrix4(AffineTransform::MakeTranslation(-planter.pivot));
-
-    for (size_t objectIndex = 0; objectIndex < m_DynamicObjects.size(); ++objectIndex)
-    {
-        m_VelocityObjects[objectIndex].world = m_DynamicObjects[objectIndex].world;
-        m_VelocityObjects[objectIndex].prevWorld = m_DynamicObjects[objectIndex].prevWorld;
-    }
+    PoseDynamicObjects();
+    MirrorVelocityObjects();
 }
 
 MotionBlur::VelocityGeometry Sponza::DynamicGeometry()

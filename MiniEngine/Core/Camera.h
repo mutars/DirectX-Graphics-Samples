@@ -46,7 +46,9 @@ namespace Math
         const Matrix4& GetProjMatrix() const { return m_ProjMatrix; }
         const Matrix4& GetViewProjMatrix() const { return m_ViewProjMatrix; }
         const Matrix4& GetReprojectionMatrix() const { return m_ReprojectMatrix; }
+        const Matrix4& GetReprojectionMatrix2() const { return m_ReprojectMatrix2; }
         const Matrix4& GetPreviousViewProjMatrix() const { return m_PreviousViewProjMatrix; }
+        const Matrix4& GetPrevPrevViewProjMatrix() const { return m_PrevPrevViewProjMatrix; }
         const Frustum& GetViewSpaceFrustum() const { return m_FrustumVS; }
         const Frustum& GetWorldSpaceFrustum() const { return m_FrustumWS; }
 
@@ -78,8 +80,15 @@ namespace Math
         // The view-projection matrix from the previous frame
         Matrix4 m_PreviousViewProjMatrix;
 
+        // The view-projection matrix from two frames ago.  Under alternate-eye rendering that frame
+        // is the SAME eye as the current one, which is the history a per-eye upscaler keeps.
+        Matrix4 m_PrevPrevViewProjMatrix;
+
         // Projects a clip-space coordinate to the previous frame (useful for temporal effects).
         Matrix4 m_ReprojectMatrix;
+
+        // Projects a clip-space coordinate two frames back.
+        Matrix4 m_ReprojectMatrix2;
 
         Frustum m_FrustumVS;		// View-space view frustum
         Frustum m_FrustumWS;		// World-space view frustum
@@ -154,6 +163,7 @@ namespace Math
         UpdateProjMatrix();
 
         m_PreviousViewProjMatrix = m_ViewProjMatrix;
+        m_PrevPrevViewProjMatrix = m_ViewProjMatrix;
     }
 
 } // namespace Math

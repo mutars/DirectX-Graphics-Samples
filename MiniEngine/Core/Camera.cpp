@@ -38,11 +38,13 @@ void BaseCamera::SetLookDirection( Vector3 forward, Vector3 up )
 
 void BaseCamera::Update()
 {
+    m_PrevPrevViewProjMatrix = m_PreviousViewProjMatrix;
     m_PreviousViewProjMatrix = m_ViewProjMatrix;
 
     m_ViewMatrix = Matrix4(~m_CameraToWorld);
     m_ViewProjMatrix = m_ProjMatrix * m_ViewMatrix;
     m_ReprojectMatrix = m_PreviousViewProjMatrix * Invert(GetViewProjMatrix());
+    m_ReprojectMatrix2 = m_PrevPrevViewProjMatrix * Invert(GetViewProjMatrix());
 
     m_FrustumVS = Frustum( m_ProjMatrix );
     m_FrustumWS = m_CameraToWorld * m_FrustumVS;
