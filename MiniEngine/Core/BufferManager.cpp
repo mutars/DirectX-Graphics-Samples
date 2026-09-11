@@ -116,16 +116,16 @@ void Graphics::InitializeRenderingBuffers( uint32_t bufferWidth, uint32_t buffer
 
         g_SceneColorBuffer.Create( L"Main Color Buffer", bufferWidth, bufferHeight, 1, DefaultHdrColorFormat, esram );
         g_SceneNormalBuffer.Create( L"Normals Buffer", bufferWidth, bufferHeight, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, esram );
-        g_VelocityBuffer.Create( L"Motion Vectors", bufferWidth, bufferHeight, 1, DXGI_FORMAT_R32_UINT );
-        g_VelocityBuffer2.Create( L"Motion Vectors Two-Frame", bufferWidth, bufferHeight, 1, DXGI_FORMAT_R32_UINT );
+        g_VelocityBuffer.Create( L"Motion Vectors", bufferWidth, bufferHeight, 1, DXGI_FORMAT_R16G16B16A16_FLOAT );
+        g_VelocityBuffer2.Create( L"Motion Vectors Two-Frame", bufferWidth, bufferHeight, 1, DXGI_FORMAT_R16G16B16A16_FLOAT );
         g_DLSSMotionBuffer.Create( L"DLSS Motion Vectors", bufferWidth, bufferHeight, 1, DXGI_FORMAT_R16G16_FLOAT );
         g_TwoFrameMotionBuffer.Create( L"Two-Frame Motion Vectors", bufferWidth, bufferHeight, 1, DXGI_FORMAT_R16G16_FLOAT );
         g_PostEffectsBuffer.Create( L"Post Effects Buffer", bufferWidth, bufferHeight, 1, DXGI_FORMAT_R32_UINT );
 
         esram.PushStack();	// Render HDR image
 
-            g_LinearDepth[0].Create( L"Linear Depth 0", bufferWidth, bufferHeight, 1, DXGI_FORMAT_R16_UNORM );
-            g_LinearDepth[1].Create( L"Linear Depth 1", bufferWidth, bufferHeight, 1, DXGI_FORMAT_R16_UNORM );
+            g_LinearDepth[0].Create( L"Linear Depth 0", bufferWidth, bufferHeight, 1, DXGI_FORMAT_R32_FLOAT );
+            g_LinearDepth[1].Create( L"Linear Depth 1", bufferWidth, bufferHeight, 1, DXGI_FORMAT_R32_FLOAT );
             g_MinMaxDepth8.Create(L"MinMaxDepth 8x8", bufferWidth3, bufferHeight3, 1, DXGI_FORMAT_R32_UINT, esram );
             g_MinMaxDepth16.Create(L"MinMaxDepth 16x16", bufferWidth4, bufferHeight4, 1, DXGI_FORMAT_R32_UINT, esram );
             g_MinMaxDepth32.Create(L"MinMaxDepth 32x32", bufferWidth5, bufferHeight5, 1, DXGI_FORMAT_R32_UINT, esram );

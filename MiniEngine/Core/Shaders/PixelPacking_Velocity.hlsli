@@ -14,7 +14,7 @@
 #ifndef __PIXEL_PACKING_VELOCITY_HLSLI__
 #define __PIXEL_PACKING_VELOCITY_HLSLI__
 
-#if 1
+#if 0
 // This is a custom packing that devotes 10 bits each to X and Y velocity but 12 bits to Z velocity.  Floats
 // are used instead of SNORM to increase precision around small deltas, which are the majority of deltas.
 // With TAA and Motion Blur, velocities are clamped, giving little reason to express them precisely in terms
@@ -59,7 +59,7 @@ float3 UnpackVelocity( packed_velocity_t Velocity )
     return float3(UnpackXY(Velocity & 0x3FF), UnpackXY((Velocity >> 10) & 0x3FF), UnpackZ(Velocity >> 20));
 }
 
-#elif 1
+#elif 0
 #define packed_velocity_t float4
 
 // Pack the velocity to write to R10G10B10A2_UNORM

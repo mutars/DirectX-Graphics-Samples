@@ -85,7 +85,7 @@ namespace Sponza
 
     // Constant-speed shapes throughout: a sinusoid would pass through zero once a cycle, and no
     // per-tick speed floor can hold across that stall.
-    const float kVaseSpinRate = 10.0f;
+    const float kVaseSpinRate = 1.0f;
     const float kVaseSlideRadius = 3.0f;
     const float kVaseSlideRate = 3.0f;
     const float kSteadyVaseRadius = 40.0f;
@@ -93,11 +93,10 @@ namespace Sponza
     const float kOccludedVaseRadius = 30.0f;
     const float kOccludedVaseRate = 1.5f;
 
-    // The planter is the deliberate exception: its phase advances exactly pi per fixed 1/90 s tick,
-    // so world(N-2) == world(N) and the two-frame object term is identically zero. COSINE, not sine:
-    // m_SceneTime starts at 0, so sin(N*pi) is 0 at every tick and the planter would never move.
-    const float kPlanterSwingAmplitude = 0.0035f;
-    const float kPlanterSwingRate = 3.14159265f * 90.0f;
+    // The planter is a slow pendulum, one swing per 300 fixed 1/90 s ticks. SINE, so it starts at
+    // full speed through the rest pose and no measured tick sits near a turning point.
+    const float kPlanterSwingAmplitude = 0.6f;
+    const float kPlanterSwingRate = 2.0f * 3.14159265f * 90.0f / 300.0f;
 
     GraphicsPSO m_DepthPSO = { (L"Sponza: Depth PSO") };
     GraphicsPSO m_CutoutDepthPSO = { (L"Sponza: Cutout Depth PSO") };
@@ -269,7 +268,7 @@ void Sponza::BuildDynamicObjects( void )
     m_DynamicObjects[kVaseSteady].placement = Vector3(390.75f, 14.88f, 41.55f);
     m_DynamicObjects[kVaseOccluded].name = "vase_occluded";
     m_DynamicObjects[kVaseOccluded].selection = AxisAlignedBox(Vector3(800.0f, -10.0f, 120.0f), Vector3(870.0f, 60.0f, 190.0f));
-    m_DynamicObjects[kVaseOccluded].placement = Vector3(-329.60f, 3.22f, -195.15f);
+    m_DynamicObjects[kVaseOccluded].placement = Vector3(-329.60f, 3.22f, -215.15f);
     m_DynamicObjects[kPlanterOscillating].name = "planter_oscillating";
     m_DynamicObjects[kPlanterOscillating].selection = AxisAlignedBox(Vector3(440.0f, 90.0f, -260.0f), Vector3(540.0f, 222.0f, -180.0f));
 
@@ -476,7 +475,7 @@ void Sponza::PoseDynamicObjects( void )
     // tilted when frozen.
     DynamicObjectState& planter = m_DynamicObjects[kPlanterOscillating];
     planter.world = Matrix4(AffineTransform::MakeTranslation(planter.placement + planter.pivot))
-        * Matrix4(AffineTransform::MakeXRotation(kPlanterSwingAmplitude * cosf(kPlanterSwingRate * m_SceneTime)))
+        * Matrix4(AffineTransform::MakeXRotation(kPlanterSwingAmplitude * sinf(kPlanterSwingRate * m_SceneTime)))
         * Matrix4(AffineTransform::MakeTranslation(-planter.pivot));
 }
 

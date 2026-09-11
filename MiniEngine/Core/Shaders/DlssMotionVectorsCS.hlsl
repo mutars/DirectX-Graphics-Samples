@@ -1,9 +1,9 @@
 // DlssMotionVectorsCS.hlsl
-// Converts MiniEngine's packed R32_UINT velocity buffer into the unjittered RG16_FLOAT
-// pixel-space motion vectors that DLSS expects. DLSS receives the jitter separately via
-// InJitterOffset, so MVs must NOT include the jitter component.
+// Converts MiniEngine's packed velocity buffer into the unjittered RG16_FLOAT pixel-space
+// motion vectors that DLSS expects. DLSS receives the jitter separately via InJitterOffset,
+// so MVs must NOT include the jitter component.
 //
-// g_VelocityBuffer: R32_UINT, packed 3D velocity (current->previous pixel space).
+// g_VelocityBuffer: packed_velocity_t (PixelPacking_Velocity.hlsli), 3D velocity (current->previous pixel space).
 // g_DLSSMotionBuffer: RW RG16_FLOAT, unjittered 2D pixel-space MV output.
 
 #include "PixelPacking_Velocity.hlsli"
@@ -16,7 +16,7 @@ cbuffer DlssMVCB : register(b1)
     float _pad1;
 }
 
-Texture2D<uint>    g_VelocityBuffer   : register(t0);
+Texture2D<packed_velocity_t> g_VelocityBuffer : register(t0);
 RWTexture2D<float2> g_DLSSMotionBuffer : register(u0);
 
 [numthreads(8, 8, 1)]
@@ -28,8 +28,8 @@ void main(uint3 DTid : SV_DispatchThreadID)
     if (coord.x >= width || coord.y >= height)
         return;
 
-    uint packed = g_VelocityBuffer[coord];
-    float3 vel  = UnpackVelocity(packed);
+    packed_velocity_t packed = g_VelocityBuffer[coord];
+    float3 vel = UnpackVelocity(packed);
 
     // vel.xy is current->previous in pixel space with jitter baked in.
     // Subtract the jitter delta so the MV is unjittered for DLSS.

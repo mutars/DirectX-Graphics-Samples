@@ -10,7 +10,7 @@
 #include "ObjectVelocity.hlsli"
 #include "PixelPacking_Velocity.hlsli"
 
-uint main(VSOutput input) : SV_Target0
+packed_velocity_t main(VSOutput input) : SV_Target0
 {
     float2 curNdc = input.curClip.xy / input.curClip.w;
     float2 prevNdc = input.prevClip.xy / input.prevClip.w;
