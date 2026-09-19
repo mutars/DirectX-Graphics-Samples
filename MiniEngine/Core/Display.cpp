@@ -190,6 +190,25 @@ namespace Graphics
 
     IDXGISwapChain1* s_SwapChain1 = nullptr;
 
+    // VRTF: the recreate seam's state. s_KeptSwapChain holds the outgoing chain of a keepOldChain
+    // recreate (a game that replaced its chain without releasing the old one yet). s_PresentQueue is
+    // the private present queue a secondQueue recreate creates the chain on, plus the copy machinery
+    // that queue needs (see BindDisplayPlanes). The queue OUTLIVES the mode -- it is created lazily
+    // and released at Shutdown, while a later recreate can put the chain back on the graphics queue --
+    // so s_ChainOnPresentQueue, not the queue pointer, is what says which shape is live.
+    IDXGISwapChain1*    s_KeptSwapChain = nullptr;
+    ID3D12CommandQueue* s_PresentQueue = nullptr;
+    ID3D12Fence*        s_PresentFence = nullptr;
+    UINT64              s_PresentFenceValue = 0;
+
+    bool                       s_ChainOnPresentQueue = false;
+    ID3D12Resource*            s_RealBackBuffer[SWAP_CHAIN_BUFFER_COUNT] = {};
+    ID3D12CommandAllocator*    s_PresentAllocator = nullptr;
+    ID3D12GraphicsCommandList* s_PresentList = nullptr;
+    ID3D12Fence*               s_PresentCopyFence = nullptr;
+    UINT64                     s_PresentCopyFenceValue = 0;
+    HANDLE                     s_PresentCopyEvent = nullptr;
+
     RootSignature s_PresentRS;
     GraphicsPSO s_BlendUIPSO(L"Core: BlendUI");
     GraphicsPSO s_BlendUIHDRPSO(L"Core: BlendUIHDR");
@@ -209,6 +228,87 @@ namespace Graphics
     EnumVar DebugZoom("Graphics/Display/Magnify Pixels", kDebugZoomOff, kDebugZoomCount, DebugZoomLabels);
 }
 
+// VRTF: the ONE swapchain desc both Initialize and Recreate create from. A replacement chain that
+// disagreed with the boot chain would make the recreate gates measure that difference instead of the
+// interception seam under test.
+static DXGI_SWAP_CHAIN_DESC1 VrtfSwapChainDesc(void)
+{
+    DXGI_SWAP_CHAIN_DESC1 swapChainDesc = {};
+    swapChainDesc.Width = g_DisplayWidth;
+    swapChainDesc.Height = g_DisplayHeight;
+    swapChainDesc.Format = SwapChainFormat;
+    swapChainDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    swapChainDesc.BufferCount = SWAP_CHAIN_BUFFER_COUNT;
+    swapChainDesc.SampleDesc.Count = 1;
+    swapChainDesc.SampleDesc.Quality = 0;
+    // VRTF: STRETCH, not NONE -- the faithful-resolution seam resizes the swapchain to the per-eye
+    // G size while the window keeps its desktop size; NONE displays an unscaled top-left CROP that
+    // hides most of the frame (HUD included). STRETCH shows the whole frame, aspect-squashed.
+    swapChainDesc.Scaling = DXGI_SCALING_STRETCH;
+    swapChainDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+    swapChainDesc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
+    swapChainDesc.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH;
+    return swapChainDesc;
+}
+
+// VRTF: the present queue's own CPU sync point, used before reusing the copy list and before
+// releasing anything a copy reads or writes. The queue is private, so g_CommandManager::IdleGPU says
+// nothing about it.
+static void IdlePresentQueue(void)
+{
+    if (s_PresentQueue == nullptr || s_PresentCopyFence == nullptr || s_PresentCopyEvent == nullptr)
+        return;
+
+    ++s_PresentCopyFenceValue;
+    s_PresentQueue->Signal(s_PresentCopyFence, s_PresentCopyFenceValue);
+    if (s_PresentCopyFence->GetCompletedValue() < s_PresentCopyFenceValue)
+    {
+        s_PresentCopyFence->SetEventOnCompletion(s_PresentCopyFenceValue, s_PresentCopyEvent);
+        WaitForSingleObject(s_PresentCopyEvent, INFINITE);
+    }
+}
+
+static void ReleaseDisplayPlanes(void)
+{
+    IdlePresentQueue();
+
+    for (uint32_t i = 0; i < SWAP_CHAIN_BUFFER_COUNT; ++i)
+    {
+        g_DisplayPlane[i].Destroy();
+        if (s_RealBackBuffer[i] != nullptr)
+        {
+            s_RealBackBuffer[i]->Release();
+            s_RealBackBuffer[i] = nullptr;
+        }
+    }
+}
+
+// VRTF: in present-queue mode the engine renders into OWNED replacement planes and the present queue
+// copies each one into the real back buffer at present time -- the FidelityFX interpolation shape
+// (FrameInterpolationSwapchainDX12.cpp: replacementSwapBuffers + presentPassthrough). Binding the
+// planes straight to the chain instead removes the device on the first present (measured:
+// GetDeviceRemovedReason 0x887A002B, DXGI_ERROR_ACCESS_DENIED): DXGI refuses writes to a flip-model
+// back buffer from any queue but the chain's own, and MiniEngine's whole present path records on the
+// graphics queue. The replacement carries the real buffers' exact size and format, which is what
+// CopyResource requires.
+static void BindDisplayPlanes(void)
+{
+    for (uint32_t i = 0; i < SWAP_CHAIN_BUFFER_COUNT; ++i)
+    {
+        if (s_ChainOnPresentQueue)
+        {
+            g_DisplayPlane[i].Create(L"VRTF Replacement BackBuffer", g_DisplayWidth, g_DisplayHeight, 1, SwapChainFormat);
+            ASSERT_SUCCEEDED(s_SwapChain1->GetBuffer(i, MY_IID_PPV_ARGS(&s_RealBackBuffer[i])));
+        }
+        else
+        {
+            ComPtr<ID3D12Resource> DisplayPlane;
+            ASSERT_SUCCEEDED(s_SwapChain1->GetBuffer(i, MY_IID_PPV_ARGS(&DisplayPlane)));
+            g_DisplayPlane[i].CreateFromSwapChain(L"Primary SwapChain Buffer", DisplayPlane.Detach());
+        }
+    }
+}
+
 void Display::Resize(uint32_t width, uint32_t height)
 {
     g_CommandManager.IdleGPU();
@@ -220,18 +320,14 @@ void Display::Resize(uint32_t width, uint32_t height)
 
     g_PreDisplayBuffer.Create(L"PreDisplay Buffer", width, height, 1, SwapChainFormat);
 
-    for (uint32_t i = 0; i < SWAP_CHAIN_BUFFER_COUNT; ++i)
-        g_DisplayPlane[i].Destroy();
+    // VRTF: before ResizeBuffers, never after -- present-queue mode holds one reference per real back
+    // buffer, and an outstanding back-buffer reference makes ResizeBuffers fail.
+    ReleaseDisplayPlanes();
 
     ASSERT(s_SwapChain1 != nullptr);
     ASSERT_SUCCEEDED(s_SwapChain1->ResizeBuffers(SWAP_CHAIN_BUFFER_COUNT, width, height, SwapChainFormat, 0));
 
-    for (uint32_t i = 0; i < SWAP_CHAIN_BUFFER_COUNT; ++i)
-    {
-        ComPtr<ID3D12Resource> DisplayPlane;
-        ASSERT_SUCCEEDED(s_SwapChain1->GetBuffer(i, MY_IID_PPV_ARGS(&DisplayPlane)));
-        g_DisplayPlane[i].CreateFromSwapChain(L"Primary SwapChain Buffer", DisplayPlane.Detach());
-    }
+    BindDisplayPlanes();
 
     g_CurrentBuffer = 0;
 
@@ -258,21 +354,7 @@ void Display::Initialize(void)
     Microsoft::WRL::ComPtr<IDXGIFactory4> dxgiFactory;
     ASSERT_SUCCEEDED(CreateDXGIFactory2(0, MY_IID_PPV_ARGS(&dxgiFactory)));
 
-    DXGI_SWAP_CHAIN_DESC1 swapChainDesc = {};
-    swapChainDesc.Width = g_DisplayWidth;
-    swapChainDesc.Height = g_DisplayHeight;
-    swapChainDesc.Format = SwapChainFormat;
-    swapChainDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-    swapChainDesc.BufferCount = SWAP_CHAIN_BUFFER_COUNT;
-    swapChainDesc.SampleDesc.Count = 1;
-    swapChainDesc.SampleDesc.Quality = 0;
-    // VRTF: STRETCH, not NONE -- the faithful-resolution seam resizes the swapchain to the per-eye
-    // G size while the window keeps its desktop size; NONE displays an unscaled top-left CROP that
-    // hides most of the frame (HUD included). STRETCH shows the whole frame, aspect-squashed.
-    swapChainDesc.Scaling = DXGI_SCALING_STRETCH;
-    swapChainDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
-    swapChainDesc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
-    swapChainDesc.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH;
+    DXGI_SWAP_CHAIN_DESC1 swapChainDesc = VrtfSwapChainDesc();
 
     DXGI_SWAP_CHAIN_FULLSCREEN_DESC fsSwapChainDesc = {};
     fsSwapChainDesc.Windowed = TRUE;
@@ -314,12 +396,7 @@ void Display::Initialize(void)
     }
 #endif // End CONDITIONALLY_ENABLE_HDR_OUTPUT
 
-    for (uint32_t i = 0; i < SWAP_CHAIN_BUFFER_COUNT; ++i)
-    {
-        ComPtr<ID3D12Resource> DisplayPlane;
-        ASSERT_SUCCEEDED(s_SwapChain1->GetBuffer(i, MY_IID_PPV_ARGS(&DisplayPlane)));
-        g_DisplayPlane[i].CreateFromSwapChain(L"Primary SwapChain Buffer", DisplayPlane.Detach());
-    }
+    BindDisplayPlanes();
 
     s_PresentRS.Reset(4, 2);
     s_PresentRS[0].InitAsDescriptorRange(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 0, 2);
@@ -374,13 +451,136 @@ void Display::Initialize(void)
     ImageScaling::Initialize(g_PreDisplayBuffer.GetFormat());
 }
 
+long Display::Recreate(const Display::RecreateRequest& request)
+{
+    if (s_SwapChain1 == nullptr)
+        return E_UNEXPECTED;
+
+    g_CommandManager.IdleGPU();
+
+    ReleaseDisplayPlanes();
+
+    if (request.keepOldChain != 0)
+    {
+        Display::ReleaseKeptSwapChain();
+        s_KeptSwapChain = s_SwapChain1;
+    }
+    else
+    {
+        s_SwapChain1->Release();
+    }
+    s_SwapChain1 = nullptr;
+
+    s_ChainOnPresentQueue = request.secondQueue != 0;
+
+    ID3D12CommandQueue* presentQueue = g_CommandManager.GetCommandQueue();
+    if (s_ChainOnPresentQueue)
+    {
+        if (s_PresentQueue == nullptr)
+        {
+            D3D12_COMMAND_QUEUE_DESC queueDesc = {};
+            queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+            queueDesc.Priority = D3D12_COMMAND_QUEUE_PRIORITY_HIGH;
+            ASSERT_SUCCEEDED(g_Device->CreateCommandQueue(&queueDesc, MY_IID_PPV_ARGS(&s_PresentQueue)));
+            ASSERT_SUCCEEDED(g_Device->CreateFence(0, D3D12_FENCE_FLAG_NONE, MY_IID_PPV_ARGS(&s_PresentFence)));
+            ASSERT_SUCCEEDED(g_Device->CreateFence(0, D3D12_FENCE_FLAG_NONE, MY_IID_PPV_ARGS(&s_PresentCopyFence)));
+            s_PresentCopyEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+            ASSERT(s_PresentCopyEvent != nullptr);
+            ASSERT_SUCCEEDED(g_Device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, MY_IID_PPV_ARGS(&s_PresentAllocator)));
+            ASSERT_SUCCEEDED(g_Device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, s_PresentAllocator, nullptr, MY_IID_PPV_ARGS(&s_PresentList)));
+            s_PresentList->Close();
+        }
+        presentQueue = s_PresentQueue;
+    }
+
+    Microsoft::WRL::ComPtr<IDXGIFactory4> dxgiFactory;
+    ASSERT_SUCCEEDED(CreateDXGIFactory2(0, MY_IID_PPV_ARGS(&dxgiFactory)));
+
+    DXGI_SWAP_CHAIN_DESC1 swapChainDesc = VrtfSwapChainDesc();
+
+    DXGI_SWAP_CHAIN_FULLSCREEN_DESC fsSwapChainDesc = {};
+    fsSwapChainDesc.Windowed = TRUE;
+
+    const HRESULT created = dxgiFactory->CreateSwapChainForHwnd(
+        presentQueue,
+        GameCore::g_hWnd,
+        &swapChainDesc,
+        &fsSwapChainDesc,
+        nullptr,
+        &s_SwapChain1);
+
+    if (FAILED(created))
+    {
+        s_SwapChain1 = nullptr;
+        return created;
+    }
+
+    BindDisplayPlanes();
+
+    g_CurrentBuffer = 0;
+
+    g_CommandManager.IdleGPU();
+
+    return S_OK;
+}
+
+bool Display::ReleaseKeptSwapChain(void)
+{
+    if (s_KeptSwapChain == nullptr)
+        return false;
+
+    s_KeptSwapChain->Release();
+    s_KeptSwapChain = nullptr;
+    return true;
+}
+
 void Display::Shutdown( void )
 {
-    s_SwapChain1->SetFullscreenState(FALSE, nullptr);
-    s_SwapChain1->Release();
+    Display::ReleaseKeptSwapChain();
 
-    for (UINT i = 0; i < SWAP_CHAIN_BUFFER_COUNT; ++i)
-        g_DisplayPlane[i].Destroy();
+    // VRTF: planes and real back buffers first -- the release idles the present queue, and the chain
+    // cannot go while a copy into its buffers is still in flight.
+    ReleaseDisplayPlanes();
+
+    // VRTF: a refused Recreate leaves no chain, so teardown cannot assume one.
+    if (s_SwapChain1 != nullptr)
+    {
+        s_SwapChain1->SetFullscreenState(FALSE, nullptr);
+        s_SwapChain1->Release();
+        s_SwapChain1 = nullptr;
+    }
+
+    if (s_PresentList != nullptr)
+    {
+        s_PresentList->Release();
+        s_PresentList = nullptr;
+    }
+    if (s_PresentAllocator != nullptr)
+    {
+        s_PresentAllocator->Release();
+        s_PresentAllocator = nullptr;
+    }
+    if (s_PresentCopyFence != nullptr)
+    {
+        s_PresentCopyFence->Release();
+        s_PresentCopyFence = nullptr;
+    }
+    if (s_PresentFence != nullptr)
+    {
+        s_PresentFence->Release();
+        s_PresentFence = nullptr;
+    }
+    if (s_PresentCopyEvent != nullptr)
+    {
+        CloseHandle(s_PresentCopyEvent);
+        s_PresentCopyEvent = nullptr;
+    }
+    if (s_PresentQueue != nullptr)
+    {
+        s_PresentQueue->Release();
+        s_PresentQueue = nullptr;
+    }
+    s_ChainOnPresentQueue = false;
 
     g_PreDisplayBuffer.Destroy();
 }
@@ -555,12 +755,59 @@ void Graphics::PreparePresentSDR(void)
 
 void Display::Present(void)
 {
+    // VRTF: a refused Recreate leaves no chain AND no display planes, so the whole frame is skipped
+    // -- composing into a destroyed plane's RTV would remove the device instead of reporting the
+    // refusal the test is measuring.
+    if (s_SwapChain1 == nullptr)
+        return;
+
     if (g_bEnableHDROutput)
         PreparePresentHDR();
     else
         PreparePresentSDR();
 
     UINT PresentInterval = s_EnableVSync ? std::min(4, (int)Round(s_FrameTime * 60.0f)) : 0;
+
+    // VRTF: the interpolation wrapper's shape (presentPassthrough). The chain presents on a queue that
+    // never saw this frame's render work: the graphics queue signals and the present queue waits, then
+    // the replacement plane is copied into the real back buffer on the chain's own queue -- the only
+    // queue allowed to write it. The replacement is read out of COMMON by implicit promotion and decays
+    // back to it, so MiniEngine's tracked state is untouched.
+    if (s_ChainOnPresentQueue)
+    {
+        ++s_PresentFenceValue;
+        g_CommandManager.GetCommandQueue()->Signal(s_PresentFence, s_PresentFenceValue);
+        s_PresentQueue->Wait(s_PresentFence, s_PresentFenceValue);
+
+        if (s_PresentCopyFence->GetCompletedValue() < s_PresentCopyFenceValue)
+        {
+            s_PresentCopyFence->SetEventOnCompletion(s_PresentCopyFenceValue, s_PresentCopyEvent);
+            WaitForSingleObject(s_PresentCopyEvent, INFINITE);
+        }
+
+        ASSERT_SUCCEEDED(s_PresentAllocator->Reset());
+        ASSERT_SUCCEEDED(s_PresentList->Reset(s_PresentAllocator, nullptr));
+
+        D3D12_RESOURCE_BARRIER barrier = {};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = s_RealBackBuffer[g_CurrentBuffer];
+        barrier.Transition.Subresource = 0;
+        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+        s_PresentList->ResourceBarrier(1, &barrier);
+
+        s_PresentList->CopyResource(s_RealBackBuffer[g_CurrentBuffer], g_DisplayPlane[g_CurrentBuffer].GetResource());
+
+        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
+        s_PresentList->ResourceBarrier(1, &barrier);
+
+        ASSERT_SUCCEEDED(s_PresentList->Close());
+
+        ID3D12CommandList* copyList[] = { s_PresentList };
+        s_PresentQueue->ExecuteCommandLists(1, copyList);
+        s_PresentQueue->Signal(s_PresentCopyFence, ++s_PresentCopyFenceValue);
+    }
 
     s_SwapChain1->Present(PresentInterval, 0);
 

@@ -17,10 +17,28 @@
 
 namespace Display
 {
+    // VRTF: what a replacement swapchain differs from the boot one by. keepOldChain keeps the
+    // outgoing chain referenced (modelling a game that has not dropped it yet); secondQueue creates
+    // the replacement on a private HIGH-priority DIRECT queue (the FidelityFX frame-interpolation
+    // shape) instead of the graphics queue. No size: always the current g_DisplayWidth/Height.
+    struct RecreateRequest
+    {
+        uint32_t keepOldChain;
+        uint32_t secondQueue;
+    };
+
     void Initialize(void);
     void Shutdown(void);
     void Resize(uint32_t width, uint32_t height);
     void Present(void);
+
+    // VRTF: replaces the live swapchain on the SAME HWND. Returns the DXGI create HRESULT verbatim
+    // (`long`, so this header stays windows.h-free) and never asserts it -- a refusal is the
+    // observable the recreate gate measures, and it leaves no chain, which makes Present a no-op.
+    long Recreate(const RecreateRequest& request);
+
+    // VRTF: drops the chain a keepOldChain recreate held onto. False when none is held.
+    bool ReleaseKeptSwapChain(void);
 }
 
 namespace Graphics
