@@ -19,13 +19,25 @@
 
 // I can't find the GameInput.h header in the GDK for Desktop yet
 #include <Xinput.h>
-#pragma comment(lib, "xinput9_1_0.lib")
+// VRTF: xinput1_4, the DLL current games import (xinput9_1_0 is the legacy subset in its own DLL).
+#pragma comment(lib, "xinput.lib")
 
 #define USE_KEYBOARD_MOUSE
 #define DIRECTINPUT_VERSION 0x0800
 #include <dinput.h>
 #pragma comment(lib, "dinput8.lib")
 #pragma comment(lib, "dxguid.lib")
+
+// VRTF: the desktop Windows.Gaming.Input path (VRTF_GAMEPAD_API=winrt), through the ABI headers WRL
+// wraps (this engine builds with /permissive). The engine's global Color class would capture the
+// SDK's `typedef struct Color Color;` inside ABI::Windows::UI (elaborated-type lookup reaches the
+// enclosing scope), so that struct is declared there first.
+namespace ABI { namespace Windows { namespace UI { struct Color; } } }
+#include <windows.gaming.input.h>
+#include <wrl/wrappers/corewrappers.h>
+#include <roapi.h>
+#include <vector>
+#pragma comment(lib, "runtimeobject.lib")
 
 #else
 
@@ -79,6 +91,155 @@ namespace
                 return (val - deadZone) / (32767.0f - deadZone);
         }
     }
+
+#ifdef _GAMING_DESKTOP
+    // VRTF_GAMEPAD_API=winrt, decided once in Initialize like the other fixture latches. Unset keeps
+    // the XInput slot-0 read; winrt binds one of the pads Windows.Gaming.Input lists the way a
+    // shipped game binds one: the slot offered on two consecutive passes over the list, tracked
+    // through one pending slot, every slot visited per pass. Only the bound pad is read, so a list
+    // whose shape changes between passes binds nothing.
+    bool s_UseWinRt = false;
+    Microsoft::WRL::ComPtr<ABI::Windows::Gaming::Input::IGamepadStatics> s_GamepadStatics;
+    std::vector<Microsoft::WRL::ComPtr<ABI::Windows::Gaming::Input::IGamepad>> s_Gamepads;
+    int32_t s_PendingSlot = -1;
+    int32_t s_BoundSlot = -1;
+    GameInput::GamepadState s_BoundState = {};
+    EventRegistrationToken s_GamepadAddedToken = {};
+    EventRegistrationToken s_GamepadRemovedToken = {};
+    volatile LONG s_GamepadListDirty = 0;
+
+    inline float FilterAnalogInput( float val, float deadZone )
+    {
+        if (val < -deadZone)
+            return (val + deadZone) / (1.0f - deadZone);
+        else if (val > deadZone)
+            return (val - deadZone) / (1.0f - deadZone);
+        else
+            return 0.0f;
+    }
+
+    void WgiInitialize()
+    {
+        using namespace ABI::Windows::Foundation;
+        using namespace ABI::Windows::Gaming::Input;
+        using namespace Microsoft::WRL;
+        using namespace Microsoft::WRL::Wrappers;
+
+        const HRESULT hr = RoGetActivationFactory(HStringReference(RuntimeClass_Windows_Gaming_Input_Gamepad).Get(), IID_PPV_ARGS(&s_GamepadStatics));
+        ASSERT(SUCCEEDED(hr), "Windows.Gaming.Input.Gamepad activation failed.");
+        if (FAILED(hr))
+            return;
+
+        // Windows raises these off-thread; the list is re-read on the next Update, as a game does.
+        auto markDirty = Callback<IEventHandler<Gamepad*>>([](IInspectable*, IGamepad*) -> HRESULT
+        {
+            InterlockedExchange(&s_GamepadListDirty, 1);
+            return S_OK;
+        });
+        s_GamepadStatics->add_GamepadAdded(markDirty.Get(), &s_GamepadAddedToken);
+        s_GamepadStatics->add_GamepadRemoved(markDirty.Get(), &s_GamepadRemovedToken);
+        InterlockedExchange(&s_GamepadListDirty, 1);
+    }
+
+    void WgiShutdown()
+    {
+        if (s_GamepadStatics)
+        {
+            s_GamepadStatics->remove_GamepadAdded(s_GamepadAddedToken);
+            s_GamepadStatics->remove_GamepadRemoved(s_GamepadRemovedToken);
+        }
+        s_Gamepads.clear();
+        s_PendingSlot = -1;
+        s_BoundSlot = -1;
+        s_BoundState = {};
+        s_GamepadStatics.Reset();
+    }
+
+    void WgiEnumerate()
+    {
+        using namespace ABI::Windows::Gaming::Input;
+
+        s_Gamepads.clear();
+        s_PendingSlot = -1;
+        s_BoundSlot = -1;
+        s_BoundState = {};
+        Microsoft::WRL::ComPtr<__FIVectorView_1_Windows__CGaming__CInput__CGamepad> view;
+        if (FAILED(s_GamepadStatics->get_Gamepads(&view)) || !view)
+            return;
+        unsigned int size = 0;
+        view->get_Size(&size);
+        for (unsigned int i = 0; i < size; ++i)
+        {
+            Microsoft::WRL::ComPtr<IGamepad> pad;
+            if (SUCCEEDED(view->GetAt(i, &pad)) && pad)
+                s_Gamepads.push_back(pad);
+        }
+    }
+
+    // One pass per Update until a slot is bound: the slot the previous pass left pending binds, any
+    // other slot visited becomes the pending one. The bound pad's reading feeds the engine's own
+    // digital/analog state exactly as the XInput slot-0 read in Update does.
+    void WgiUpdate()
+    {
+        using namespace ABI::Windows::Gaming::Input;
+
+        if (InterlockedExchange(&s_GamepadListDirty, 0) != 0)
+            WgiEnumerate();
+
+        if (s_BoundSlot < 0)
+        {
+            for (size_t i = 0; i < s_Gamepads.size() && s_BoundSlot < 0; ++i)
+            {
+                if (s_PendingSlot == (int32_t)i)
+                    s_BoundSlot = (int32_t)i;
+                else
+                    s_PendingSlot = (int32_t)i;
+            }
+            if (s_BoundSlot < 0)
+                return;
+        }
+
+        GamepadReading reading = {};
+        s_BoundState = {};
+        s_BoundState.Result = s_Gamepads[s_BoundSlot]->GetCurrentReading(&reading);
+        if (FAILED(s_BoundState.Result))
+            return;
+        s_BoundState.Timestamp = reading.Timestamp;
+        s_BoundState.Buttons = (uint32_t)reading.Buttons;
+        s_BoundState.LeftTrigger = reading.LeftTrigger;
+        s_BoundState.RightTrigger = reading.RightTrigger;
+        s_BoundState.LeftThumbstickX = reading.LeftThumbstickX;
+        s_BoundState.LeftThumbstickY = reading.LeftThumbstickY;
+        s_BoundState.RightThumbstickX = reading.RightThumbstickX;
+        s_BoundState.RightThumbstickY = reading.RightThumbstickY;
+
+        const GameInput::GamepadState& bound = s_BoundState;
+        const uint32_t Buttons = bound.Buttons;
+        if (Buttons & GamepadButtons_DPadUp) s_Buttons[0][GameInput::kDPadUp] = true;
+        if (Buttons & GamepadButtons_DPadDown) s_Buttons[0][GameInput::kDPadDown] = true;
+        if (Buttons & GamepadButtons_DPadLeft) s_Buttons[0][GameInput::kDPadLeft] = true;
+        if (Buttons & GamepadButtons_DPadRight) s_Buttons[0][GameInput::kDPadRight] = true;
+        if (Buttons & GamepadButtons_Menu) s_Buttons[0][GameInput::kStartButton] = true;
+        if (Buttons & GamepadButtons_View) s_Buttons[0][GameInput::kBackButton] = true;
+        if (Buttons & GamepadButtons_LeftThumbstick) s_Buttons[0][GameInput::kLThumbClick] = true;
+        if (Buttons & GamepadButtons_RightThumbstick) s_Buttons[0][GameInput::kRThumbClick] = true;
+        if (Buttons & GamepadButtons_LeftShoulder) s_Buttons[0][GameInput::kLShoulder] = true;
+        if (Buttons & GamepadButtons_RightShoulder) s_Buttons[0][GameInput::kRShoulder] = true;
+        if (Buttons & GamepadButtons_A) s_Buttons[0][GameInput::kAButton] = true;
+        if (Buttons & GamepadButtons_B) s_Buttons[0][GameInput::kBButton] = true;
+        if (Buttons & GamepadButtons_X) s_Buttons[0][GameInput::kXButton] = true;
+        if (Buttons & GamepadButtons_Y) s_Buttons[0][GameInput::kYButton] = true;
+
+        static const float kAnalogStickDeadZone = 0.18f;
+
+        s_Analogs[GameInput::kAnalogLeftTrigger]  = (float)bound.LeftTrigger;
+        s_Analogs[GameInput::kAnalogRightTrigger] = (float)bound.RightTrigger;
+        s_Analogs[GameInput::kAnalogLeftStickX]   = FilterAnalogInput((float)bound.LeftThumbstickX, kAnalogStickDeadZone);
+        s_Analogs[GameInput::kAnalogLeftStickY]   = FilterAnalogInput((float)bound.LeftThumbstickY, kAnalogStickDeadZone);
+        s_Analogs[GameInput::kAnalogRightStickX]  = FilterAnalogInput((float)bound.RightThumbstickX, kAnalogStickDeadZone);
+        s_Analogs[GameInput::kAnalogRightStickY]  = FilterAnalogInput((float)bound.RightThumbstickY, kAnalogStickDeadZone);
+    }
+#endif
 
 #ifdef USE_KEYBOARD_MOUSE
     void KbmBuildKeyMapping()
@@ -277,6 +438,13 @@ void GameInput::Initialize()
     ZeroMemory(s_Buttons, sizeof(s_Buttons) );
     ZeroMemory(s_Analogs, sizeof(s_Analogs) );
 
+#ifdef _GAMING_DESKTOP
+    char api[16] = {};
+    s_UseWinRt = GetEnvironmentVariableA("VRTF_GAMEPAD_API", api, sizeof(api)) > 0 && strcmp(api, "winrt") == 0;
+    if (s_UseWinRt)
+        WgiInitialize();
+#endif
+
 #ifdef USE_KEYBOARD_MOUSE
     KbmInitialize();
 #endif
@@ -284,6 +452,10 @@ void GameInput::Initialize()
 
 void GameInput::Shutdown()
 {
+#ifdef _GAMING_DESKTOP
+    WgiShutdown();
+#endif
+
 #ifdef USE_KEYBOARD_MOUSE
     KbmShutdown();
 #endif
@@ -301,7 +473,9 @@ void GameInput::Update( float frameDelta )
         s_Buttons[0][InputEnum] = !!(newInputState.Gamepad.wButtons & GameInputMask);
 
     XINPUT_STATE newInputState;
-    if (ERROR_SUCCESS == XInputGetState(0, &newInputState))
+    if (s_UseWinRt)
+        WgiUpdate();
+    else if (ERROR_SUCCESS == XInputGetState(0, &newInputState))
     {
         SET_BUTTON_VALUE(kDPadUp, XINPUT_GAMEPAD_DPAD_UP);
         SET_BUTTON_VALUE(kDPadDown, XINPUT_GAMEPAD_DPAD_DOWN);
@@ -443,4 +617,35 @@ float GameInput::GetAnalogInput( AnalogInput ai )
 float GameInput::GetTimeCorrectedAnalogInput( AnalogInput ai )
 {
     return s_AnalogsTC[ai];
+}
+
+uint32_t GameInput::GetGamepadCount()
+{
+#ifdef _GAMING_DESKTOP
+    return (uint32_t)s_Gamepads.size();
+#else
+    return 0;
+#endif
+}
+
+int32_t GameInput::GetBoundGamepadSlot()
+{
+#ifdef _GAMING_DESKTOP
+    return s_BoundSlot;
+#else
+    return -1;
+#endif
+}
+
+bool GameInput::GetBoundGamepadReading( GamepadState& out )
+{
+#ifdef _GAMING_DESKTOP
+    if (s_BoundSlot < 0)
+        return false;
+    out = s_BoundState;
+    return true;
+#else
+    (void)out;
+    return false;
+#endif
 }

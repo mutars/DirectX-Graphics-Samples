@@ -13,6 +13,8 @@
 
 #pragma once
 
+#include <cstdint>
+
 namespace GameInput
 {
     void Initialize();
@@ -188,6 +190,30 @@ namespace GameInput
 
     float GetAnalogInput( AnalogInput ai );
     float GetTimeCorrectedAnalogInput( AnalogInput ai );
+
+    // What the pad the Windows.Gaming.Input path (VRTF_GAMEPAD_API=winrt) bound reported at the last
+    // Update; the digital/analog state above comes from it. The XInput path reads slot 0 alone,
+    // lists nothing and binds nothing.
+    struct GamepadState
+    {
+        uint64_t Timestamp;
+        uint32_t Buttons;     // Windows.Gaming.Input GamepadButtons bits
+        long     Result;      // HRESULT of GetCurrentReading
+        double   LeftTrigger;
+        double   RightTrigger;
+        double   LeftThumbstickX;
+        double   LeftThumbstickY;
+        double   RightThumbstickX;
+        double   RightThumbstickY;
+    };
+
+    // The pads Windows.Gaming.Input listed at the last Update.
+    uint32_t GetGamepadCount();
+    // The slot of that list the engine bound and reads -- the one offered on two consecutive passes
+    // over it -- or -1 while none is bound.
+    int32_t GetBoundGamepadSlot();
+    // The bound pad's reading at the last Update; false while none is bound.
+    bool GetBoundGamepadReading( GamepadState& out );
 
 #if !WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_TV_TITLE | WINAPI_PARTITION_DESKTOP)
     void SetKeyState(Windows::System::VirtualKey key, bool IsDown);
