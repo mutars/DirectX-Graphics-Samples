@@ -246,7 +246,10 @@ static DXGI_SWAP_CHAIN_DESC1 VrtfSwapChainDesc(void)
     // hides most of the frame (HUD included). STRETCH shows the whole frame, aspect-squashed.
     swapChainDesc.Scaling = DXGI_SCALING_STRETCH;
     swapChainDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
-    swapChainDesc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
+    // VRTF: UNSPECIFIED, not IGNORE. On an IGNORE flip chain DWM holds a second set of the chain's
+    // buffers, and that set stays charged to dwm.exe after the chain, its window and the process are
+    // gone, until DWM restarts -- window shown, hidden or cloaked.
+    swapChainDesc.AlphaMode = DXGI_ALPHA_MODE_UNSPECIFIED;
     swapChainDesc.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH;
     return swapChainDesc;
 }
