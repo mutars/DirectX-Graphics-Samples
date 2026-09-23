@@ -63,6 +63,7 @@ namespace Sponza
         Vector3 pivot = Vector3(kZero);
         Vector3 placement = Vector3(kZero);
         AxisAlignedBox bounds;
+        DynamicMotion motion = {};
         std::vector<MotionBlur::VelocityRange> ranges;
         Matrix4 world = Matrix4(kIdentity);
         Matrix4 prevWorld = Matrix4(kIdentity);
@@ -165,13 +166,13 @@ void Sponza::Startup( Camera& Camera )
     m_CutoutShadowPSO.SetRasterizerState(RasterizerShadowTwoSided);
     m_CutoutShadowPSO.Finalize();
 
-    DXGI_FORMAT formats[2] = { ColorFormat, NormalFormat };
+    DXGI_FORMAT formats[4] = { ColorFormat, NormalFormat, g_SceneAlbedoBuffer.GetFormat(), g_SceneMaterialBuffer.GetFormat() };
 
     // Full color pass
     m_ModelPSO = m_DepthPSO;
     m_ModelPSO.SetBlendState(BlendDisable);
     m_ModelPSO.SetDepthStencilState(DepthStateTestEqual);
-    m_ModelPSO.SetRenderTargetFormats(2, formats, DepthFormat);
+    m_ModelPSO.SetRenderTargetFormats(_countof(formats), formats, DepthFormat);
     m_ModelPSO.SetVertexShader( g_pModelViewerVS, sizeof(g_pModelViewerVS) );
     m_ModelPSO.SetPixelShader( g_pModelViewerPS, sizeof(g_pModelViewerPS) );
     m_ModelPSO.Finalize();
@@ -271,6 +272,16 @@ void Sponza::BuildDynamicObjects( void )
     m_DynamicObjects[kVaseOccluded].placement = Vector3(-329.60f, 3.22f, -215.15f);
     m_DynamicObjects[kPlanterOscillating].name = "planter_oscillating";
     m_DynamicObjects[kPlanterOscillating].selection = AxisAlignedBox(Vector3(440.0f, 90.0f, -260.0f), Vector3(540.0f, 222.0f, -180.0f));
+
+    m_DynamicObjects[kVaseSpinning].motion.spinRate = kVaseSpinRate;
+    m_DynamicObjects[kVaseSpinning].motion.orbitRadius = kVaseSlideRadius;
+    m_DynamicObjects[kVaseSpinning].motion.orbitRate = kVaseSlideRate;
+    m_DynamicObjects[kVaseSteady].motion.orbitRadius = kSteadyVaseRadius;
+    m_DynamicObjects[kVaseSteady].motion.orbitRate = kSteadyVaseRate;
+    m_DynamicObjects[kVaseOccluded].motion.orbitRadius = kOccludedVaseRadius;
+    m_DynamicObjects[kVaseOccluded].motion.orbitRate = kOccludedVaseRate;
+    m_DynamicObjects[kPlanterOscillating].motion.swingAmplitude = kPlanterSwingAmplitude;
+    m_DynamicObjects[kPlanterOscillating].motion.swingRate = kPlanterSwingRate;
 
     const uint32_t VertexStride = m_Model.GetVertexStride();
 
@@ -456,27 +467,57 @@ void Sponza::PoseDynamicObjects( void )
         return Vector3(radius * (1.0f - cosf(angle)), 0.0f, radius * sinf(angle));
     };
 
-    // Constant screen speed with no stall at an extreme.
-    auto orbit = [&slideOffset](DynamicObjectState& object, float radius, float rate)
+    // A triangle wave: constant speed, reversing at either end.
+    auto strokeOffset = [](const DynamicMotion& motion, float time)
     {
-        object.world = Matrix4(AffineTransform::MakeTranslation(object.placement + slideOffset(radius, rate * m_SceneTime)));
+        const float halfLength = motion.strokeHalfLength;
+        if (halfLength <= 0.0f)
+            return Vector3(kZero);
+        const float travelled = fmodf(motion.strokeSpeed * time, 4.0f * halfLength);
+        const float along = travelled < 2.0f * halfLength ? travelled - halfLength : 3.0f * halfLength - travelled;
+        return Vector3(motion.strokeDirection[0], motion.strokeDirection[1], motion.strokeDirection[2]) * along;
     };
 
-    DynamicObjectState& spinning = m_DynamicObjects[kVaseSpinning];
-    const Vector3 slide = slideOffset(kVaseSlideRadius, kVaseSlideRate * m_SceneTime);
-    spinning.world = Matrix4(AffineTransform::MakeTranslation(spinning.placement + spinning.pivot + slide))
-        * Matrix4(AffineTransform::MakeYRotation(kVaseSpinRate * m_SceneTime))
-        * Matrix4(AffineTransform::MakeTranslation(-spinning.pivot));
+    // Terms a default motion leaves at zero add exact zeros and identity rotations, so each default
+    // reproduces the fixture's original per-object expression bit for bit.
+    for (DynamicObjectState& object : m_DynamicObjects)
+    {
+        const DynamicMotion& motion = object.motion;
+        const bool rotates = motion.spinRate != 0.0f || motion.swingAmplitude != 0.0f;
+        const Vector3 origin = rotates ? object.placement + object.pivot : object.placement;
+        const Vector3 translation = origin + slideOffset(motion.orbitRadius, motion.orbitRate * m_SceneTime)
+            + Vector3(motion.offset[0], motion.offset[1], motion.offset[2]) + strokeOffset(motion, m_SceneTime);
+        if (!rotates)
+        {
+            object.world = Matrix4(AffineTransform::MakeTranslation(translation));
+            continue;
+        }
+        // The planter swings about the top of its own bounds.
+        object.world = Matrix4(AffineTransform::MakeTranslation(translation))
+            * Matrix4(AffineTransform::MakeYRotation(motion.spinRate * m_SceneTime))
+            * Matrix4(AffineTransform::MakeXRotation(motion.swingAmplitude * sinf(motion.swingRate * m_SceneTime)))
+            * Matrix4(AffineTransform::MakeTranslation(-object.pivot));
+    }
+}
 
-    orbit(m_DynamicObjects[kVaseSteady], kSteadyVaseRadius, kSteadyVaseRate);
-    orbit(m_DynamicObjects[kVaseOccluded], kOccludedVaseRadius, kOccludedVaseRate);
+Sponza::DynamicMotion Sponza::GetDynamicMotion( uint32_t index )
+{
+    ASSERT(index < m_DynamicObjects.size());
+    return m_DynamicObjects[index].motion;
+}
 
-    // Swings about the top of its own bounds, so it is not the identity at t=0: the planter hangs
-    // tilted when frozen.
-    DynamicObjectState& planter = m_DynamicObjects[kPlanterOscillating];
-    planter.world = Matrix4(AffineTransform::MakeTranslation(planter.placement + planter.pivot))
-        * Matrix4(AffineTransform::MakeXRotation(kPlanterSwingAmplitude * sinf(kPlanterSwingRate * m_SceneTime)))
-        * Matrix4(AffineTransform::MakeTranslation(-planter.pivot));
+void Sponza::SetDynamicMotion( uint32_t index, const DynamicMotion& motion )
+{
+    ASSERT(index < m_DynamicObjects.size());
+    ASSERT(motion.strokeSpeed >= 0.0f, "The stroke direction carries the sign; the speed is a magnitude");
+    DynamicMotion& target = m_DynamicObjects[index].motion;
+    target = motion;
+    const Vector3 direction(motion.strokeDirection[0], motion.strokeDirection[1], motion.strokeDirection[2]);
+    const float length = Length(direction);
+    const Vector3 unit = length > 0.0f ? direction / length : Vector3(kZero);
+    target.strokeDirection[0] = unit.GetX();
+    target.strokeDirection[1] = unit.GetY();
+    target.strokeDirection[2] = unit.GetZ();
 }
 
 void Sponza::MirrorVelocityObjects( void )
@@ -764,7 +805,11 @@ void Sponza::RenderScene(
             {
                 gfxContext.TransitionResource(g_SceneColorBuffer, D3D12_RESOURCE_STATE_RENDER_TARGET, true);
                 gfxContext.TransitionResource(g_SceneNormalBuffer, D3D12_RESOURCE_STATE_RENDER_TARGET, true);
+                gfxContext.TransitionResource(g_SceneAlbedoBuffer, D3D12_RESOURCE_STATE_RENDER_TARGET, true);
+                gfxContext.TransitionResource(g_SceneMaterialBuffer, D3D12_RESOURCE_STATE_RENDER_TARGET, true);
                 gfxContext.ClearColor(g_SceneColorBuffer);
+                gfxContext.ClearColor(g_SceneAlbedoBuffer);
+                gfxContext.ClearColor(g_SceneMaterialBuffer);
             }
         }
     }
@@ -814,7 +859,8 @@ void Sponza::RenderScene(
                 {
                     gfxContext.SetPipelineState(m_ModelPSO);
                     gfxContext.TransitionResource(g_SceneDepthBuffer, D3D12_RESOURCE_STATE_DEPTH_READ);
-                    D3D12_CPU_DESCRIPTOR_HANDLE rtvs[]{ g_SceneColorBuffer.GetRTV(), g_SceneNormalBuffer.GetRTV() };
+                    D3D12_CPU_DESCRIPTOR_HANDLE rtvs[]{ g_SceneColorBuffer.GetRTV(), g_SceneNormalBuffer.GetRTV(), g_SceneAlbedoBuffer.GetRTV(),
+                        g_SceneMaterialBuffer.GetRTV() };
                     gfxContext.SetRenderTargets(ARRAYSIZE(rtvs), rtvs, g_SceneDepthBuffer.GetDSV_DepthReadOnly());
                     gfxContext.SetViewportAndScissor(viewport, scissor);
                 }

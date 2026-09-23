@@ -23,6 +23,8 @@ namespace Graphics
     DepthBuffer g_SceneDepthBuffer;
     ColorBuffer g_SceneColorBuffer;
     ColorBuffer g_SceneNormalBuffer;
+    ColorBuffer g_SceneAlbedoBuffer;
+    ColorBuffer g_SceneMaterialBuffer;
     ColorBuffer g_PostEffectsBuffer;
     ColorBuffer g_VelocityBuffer;
     ColorBuffer g_VelocityBuffer2;
@@ -116,6 +118,8 @@ void Graphics::InitializeRenderingBuffers( uint32_t bufferWidth, uint32_t buffer
 
         g_SceneColorBuffer.Create( L"Main Color Buffer", bufferWidth, bufferHeight, 1, DefaultHdrColorFormat, esram );
         g_SceneNormalBuffer.Create( L"Normals Buffer", bufferWidth, bufferHeight, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, esram );
+        g_SceneAlbedoBuffer.Create( L"Albedo Buffer", bufferWidth, bufferHeight, 1, DXGI_FORMAT_R8G8B8A8_UNORM );
+        g_SceneMaterialBuffer.Create( L"Material Buffer", bufferWidth, bufferHeight, 1, DXGI_FORMAT_R8G8B8A8_UNORM );
         g_VelocityBuffer.Create( L"Motion Vectors", bufferWidth, bufferHeight, 1, DXGI_FORMAT_R16G16B16A16_FLOAT );
         g_VelocityBuffer2.Create( L"Motion Vectors Two-Frame", bufferWidth, bufferHeight, 1, DXGI_FORMAT_R16G16B16A16_FLOAT );
         g_DLSSMotionBuffer.Create( L"DLSS Motion Vectors", bufferWidth, bufferHeight, 1, DXGI_FORMAT_R16G16_FLOAT );
@@ -255,6 +259,8 @@ void Graphics::DestroyRenderingBuffers()
     g_SceneDepthBuffer.Destroy();
     g_SceneColorBuffer.Destroy();
     g_SceneNormalBuffer.Destroy();
+    g_SceneAlbedoBuffer.Destroy();
+    g_SceneMaterialBuffer.Destroy();
     g_VelocityBuffer.Destroy();
     g_VelocityBuffer2.Destroy();
     g_DLSSMotionBuffer.Destroy();

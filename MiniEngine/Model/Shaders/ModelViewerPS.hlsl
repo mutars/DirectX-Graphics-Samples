@@ -38,6 +38,8 @@ struct MRT
 {
 	float3 Color : SV_Target0;
 	float3 Normal : SV_Target1;
+	float4 Albedo : SV_Target2;
+	float4 Material : SV_Target3;
 };
 
 [RootSignature(Renderer_RootSig)]
@@ -50,10 +52,8 @@ MRT main(VSOutput vsOutput)
 
     float3 diffuseAlbedo = SAMPLE_TEX(texDiffuse);
     float3 colorSum = 0;
-    {
-        float ao = texSSAO[pixelPos];
-        colorSum += ApplyAmbientLight( diffuseAlbedo, ao, AmbientColor );
-    }
+    float ao = texSSAO[pixelPos];
+    colorSum += ApplyAmbientLight( diffuseAlbedo, ao, AmbientColor );
 
     float gloss = 128.0;
     float3 normal;
@@ -81,5 +81,7 @@ MRT main(VSOutput vsOutput)
 
 	mrt.Normal = normal;
 	mrt.Color = colorSum;
+	mrt.Albedo = float4(diffuseAlbedo, 1.0);
+	mrt.Material = float4(specularMask, saturate(gloss / 255.0), ao, 1.0);
 	return mrt;
 }
