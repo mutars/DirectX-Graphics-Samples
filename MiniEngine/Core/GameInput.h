@@ -215,6 +215,13 @@ namespace GameInput
     // The bound pad's reading at the last Update; false while none is bound.
     bool GetBoundGamepadReading( GamepadState& out );
 
+    // VRTF_GAMEPAD_API=xinput-devicechange: XInput slot 0 is probed at the first Update and, once a
+    // probe or read failed, again only after the window reports a device change -- the polling
+    // shape of a game that re-checks its pad on WM_DEVICECHANGE alone.
+    void RequestXInputProbe();
+    // The probes that shape made so far: the first Update's, then one per Update after a device change.
+    uint32_t GetXInputProbeCount();
+
 #if !WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_TV_TITLE | WINAPI_PARTITION_DESKTOP)
     void SetKeyState(Windows::System::VirtualKey key, bool IsDown);
 #endif

@@ -99,6 +99,12 @@ namespace
     // through one pending slot, every slot visited per pass. Only the bound pad is read, so a list
     // whose shape changes between passes binds nothing.
     bool s_UseWinRt = false;
+    // VRTF_GAMEPAD_API=xinput-devicechange, the same Initialize latch. The window procedure requests a
+    // probe from the message thread, which is the thread that runs Update.
+    bool s_XInputOnDeviceChange = false;
+    bool s_XInputConnected = false;
+    bool s_XInputProbeRequested = true;
+    uint32_t s_XInputProbes = 0;
     Microsoft::WRL::ComPtr<ABI::Windows::Gaming::Input::IGamepadStatics> s_GamepadStatics;
     std::vector<Microsoft::WRL::ComPtr<ABI::Windows::Gaming::Input::IGamepad>> s_Gamepads;
     int32_t s_PendingSlot = -1;
@@ -107,6 +113,22 @@ namespace
     EventRegistrationToken s_GamepadAddedToken = {};
     EventRegistrationToken s_GamepadRemovedToken = {};
     volatile LONG s_GamepadListDirty = 0;
+
+    bool XInputRead( XINPUT_STATE& state )
+    {
+        if (!s_XInputOnDeviceChange)
+            return ERROR_SUCCESS == XInputGetState(0, &state);
+
+        if (s_XInputProbeRequested)
+        {
+            s_XInputProbeRequested = false;
+            s_XInputConnected = true;
+            ++s_XInputProbes;
+        }
+        if (s_XInputConnected)
+            s_XInputConnected = ERROR_SUCCESS == XInputGetState(0, &state);
+        return s_XInputConnected;
+    }
 
     inline float FilterAnalogInput( float val, float deadZone )
     {
@@ -439,8 +461,10 @@ void GameInput::Initialize()
     ZeroMemory(s_Analogs, sizeof(s_Analogs) );
 
 #ifdef _GAMING_DESKTOP
-    char api[16] = {};
-    s_UseWinRt = GetEnvironmentVariableA("VRTF_GAMEPAD_API", api, sizeof(api)) > 0 && strcmp(api, "winrt") == 0;
+    char api[32] = {};
+    const bool apiSet = GetEnvironmentVariableA("VRTF_GAMEPAD_API", api, sizeof(api)) > 0;
+    s_UseWinRt = apiSet && strcmp(api, "winrt") == 0;
+    s_XInputOnDeviceChange = apiSet && strcmp(api, "xinput-devicechange") == 0;
     if (s_UseWinRt)
         WgiInitialize();
 #endif
@@ -475,7 +499,7 @@ void GameInput::Update( float frameDelta )
     XINPUT_STATE newInputState;
     if (s_UseWinRt)
         WgiUpdate();
-    else if (ERROR_SUCCESS == XInputGetState(0, &newInputState))
+    else if (XInputRead(newInputState))
     {
         SET_BUTTON_VALUE(kDPadUp, XINPUT_GAMEPAD_DPAD_UP);
         SET_BUTTON_VALUE(kDPadDown, XINPUT_GAMEPAD_DPAD_DOWN);
@@ -623,6 +647,22 @@ uint32_t GameInput::GetGamepadCount()
 {
 #ifdef _GAMING_DESKTOP
     return (uint32_t)s_Gamepads.size();
+#else
+    return 0;
+#endif
+}
+
+void GameInput::RequestXInputProbe()
+{
+#ifdef _GAMING_DESKTOP
+    s_XInputProbeRequested = true;
+#endif
+}
+
+uint32_t GameInput::GetXInputProbeCount()
+{
+#ifdef _GAMING_DESKTOP
+    return s_XInputProbes;
 #else
     return 0;
 #endif
