@@ -117,9 +117,14 @@ void CommandListManager::CreateNewCommandList( D3D12_COMMAND_LIST_TYPE Type, ID3
 
 uint64_t CommandQueue::ExecuteCommandList( ID3D12CommandList* List )
 {
-    std::lock_guard<std::mutex> LockGuard(m_FenceMutex);
-
     ASSERT_SUCCEEDED(((ID3D12GraphicsCommandList*)List)->Close());
+
+    return ExecuteClosedCommandList(List);
+}
+
+uint64_t CommandQueue::ExecuteClosedCommandList( ID3D12CommandList* List )
+{
+    std::lock_guard<std::mutex> LockGuard(m_FenceMutex);
 
     // Kickoff the command list
     m_CommandQueue->ExecuteCommandLists(1, &List);

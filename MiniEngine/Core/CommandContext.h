@@ -90,6 +90,12 @@ private:
 
     void Reset( void );
 
+    // VRTF: EndRecording is the common head of Finish and FinishHeld. Retire is the common tail of
+    // every submit path: the allocator, linear-allocator pages and dynamic descriptor heaps retire at
+    // FenceValue.
+    void EndRecording( void );
+    void Retire( uint64_t FenceValue );
+
 public:
 
     ~CommandContext(void);
@@ -103,6 +109,21 @@ public:
 
     // Flush existing commands and release the current context
     uint64_t Finish( bool WaitForCompletion = false );
+
+    // VRTF: a deferred-submit window. Inside it Finish closes each list and queues it instead of
+    // executing it (and returns 0); SubmitDeferred executes the queue in Finish order, retires each
+    // context as Finish would, and closes the window. Finish(true), Flush, FinishHeld and ExecuteHeld
+    // assert inside it: each would wait for, or execute ahead of, work that is not submitted yet.
+    static void BeginDeferredSubmit(void);
+    static void SubmitDeferred(void);
+
+    // VRTF: FinishHeld is Finish, except that the context, its closed list and everything the list
+    // references -- allocator, linear-allocator pages, dynamic descriptor heaps -- stay out of the
+    // pools, so the list can execute again. ExecuteHeld executes it once more on its queue; ReleaseHeld
+    // retires it at the last fence it signalled and returns it to the pool.
+    uint64_t FinishHeld(void);
+    uint64_t ExecuteHeld(void);
+    void ReleaseHeld(void);
 
     // Prepare to render by reserving a command list and command allocator
     void Initialize(void);
@@ -189,6 +210,9 @@ protected:
     void SetID(const std::wstring& ID) { m_ID = ID; }
 
     D3D12_COMMAND_LIST_TYPE m_Type;
+
+    bool m_Held;
+    uint64_t m_HeldFenceValue;
 };
 
 class GraphicsContext : public CommandContext

@@ -50,6 +50,9 @@ public:
 private:
 
     uint64_t ExecuteCommandList(ID3D12CommandList* List);
+    // VRTF: ExecuteCommandList for a list its caller already closed -- a deferred submit, or a held
+    // list executed again. Signals the queue's fence exactly as ExecuteCommandList does.
+    uint64_t ExecuteClosedCommandList(ID3D12CommandList* List);
     ID3D12CommandAllocator* RequestAllocator(void);
     void DiscardAllocator(uint64_t FenceValueForReset, ID3D12CommandAllocator* Allocator);
 

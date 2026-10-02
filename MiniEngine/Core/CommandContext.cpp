@@ -28,6 +28,20 @@
 
 using namespace Graphics;
 
+// VRTF: the deferred-submit window (CommandContext::BeginDeferredSubmit). One lock over the flag and
+// the queue, so a Finish on any thread either queues inside the window or submits outside it.
+namespace
+{
+    std::mutex s_DeferMutex;
+    bool s_DeferSubmit = false;
+    std::vector<CommandContext*> s_Deferred;
+
+    bool DeferringSubmit(void)
+    {
+        std::lock_guard<std::mutex> LockGuard(s_DeferMutex);
+        return s_DeferSubmit;
+    }
+}
 
 void ContextManager::DestroyAllContexts(void)
 {
@@ -96,6 +110,8 @@ ComputeContext& ComputeContext::Begin(const std::wstring& ID, bool Async)
 
 uint64_t CommandContext::Flush(bool WaitForCompletion)
 {
+    ASSERT(!DeferringSubmit(), "Flush inside a deferred-submit window");
+
     FlushResourceBarriers();
 
     ASSERT(m_CurrentAllocator != nullptr);
@@ -129,7 +145,7 @@ uint64_t CommandContext::Flush(bool WaitForCompletion)
     return FenceValue;
 }
 
-uint64_t CommandContext::Finish( bool WaitForCompletion )
+void CommandContext::EndRecording( void )
 {
     ASSERT(m_Type == D3D12_COMMAND_LIST_TYPE_DIRECT || m_Type == D3D12_COMMAND_LIST_TYPE_COMPUTE);
 
@@ -139,17 +155,36 @@ uint64_t CommandContext::Finish( bool WaitForCompletion )
         EngineProfiling::EndBlock(this);
 
     ASSERT(m_CurrentAllocator != nullptr);
+}
 
-    CommandQueue& Queue = g_CommandManager.GetQueue(m_Type);
-
-    uint64_t FenceValue = Queue.ExecuteCommandList(m_CommandList);
-    Queue.DiscardAllocator(FenceValue, m_CurrentAllocator);
+void CommandContext::Retire( uint64_t FenceValue )
+{
+    g_CommandManager.GetQueue(m_Type).DiscardAllocator(FenceValue, m_CurrentAllocator);
     m_CurrentAllocator = nullptr;
 
     m_CpuLinearAllocator.CleanupUsedPages(FenceValue);
     m_GpuLinearAllocator.CleanupUsedPages(FenceValue);
     m_DynamicViewDescriptorHeap.CleanupUsedHeaps(FenceValue);
     m_DynamicSamplerDescriptorHeap.CleanupUsedHeaps(FenceValue);
+}
+
+uint64_t CommandContext::Finish( bool WaitForCompletion )
+{
+    EndRecording();
+
+    {
+        std::lock_guard<std::mutex> LockGuard(s_DeferMutex);
+        if (s_DeferSubmit)
+        {
+            ASSERT(!WaitForCompletion, "Finish(true) inside a deferred-submit window");
+            ASSERT_SUCCEEDED(m_CommandList->Close());
+            s_Deferred.push_back(this);
+            return 0;
+        }
+    }
+
+    uint64_t FenceValue = g_CommandManager.GetQueue(m_Type).ExecuteCommandList(m_CommandList);
+    Retire(FenceValue);
 
     if (WaitForCompletion)
         g_CommandManager.WaitForFence(FenceValue);
@@ -157,6 +192,58 @@ uint64_t CommandContext::Finish( bool WaitForCompletion )
     g_ContextManager.FreeContext(this);
 
     return FenceValue;
+}
+
+void CommandContext::BeginDeferredSubmit(void)
+{
+    std::lock_guard<std::mutex> LockGuard(s_DeferMutex);
+    ASSERT(!s_DeferSubmit && s_Deferred.empty(), "BeginDeferredSubmit inside a deferred-submit window");
+    s_DeferSubmit = true;
+}
+
+void CommandContext::SubmitDeferred(void)
+{
+    std::lock_guard<std::mutex> LockGuard(s_DeferMutex);
+    ASSERT(s_DeferSubmit, "SubmitDeferred outside a deferred-submit window");
+
+    for (CommandContext* Context : s_Deferred)
+    {
+        uint64_t FenceValue = g_CommandManager.GetQueue(Context->m_Type).ExecuteClosedCommandList(Context->m_CommandList);
+        Context->Retire(FenceValue);
+        g_ContextManager.FreeContext(Context);
+    }
+
+    s_Deferred.clear();
+    s_DeferSubmit = false;
+}
+
+uint64_t CommandContext::FinishHeld(void)
+{
+    ASSERT(!DeferringSubmit(), "FinishHeld inside a deferred-submit window");
+
+    EndRecording();
+
+    m_HeldFenceValue = g_CommandManager.GetQueue(m_Type).ExecuteCommandList(m_CommandList);
+    m_Held = true;
+    return m_HeldFenceValue;
+}
+
+uint64_t CommandContext::ExecuteHeld(void)
+{
+    ASSERT(m_Held, "ExecuteHeld on a context that is not held");
+    ASSERT(!DeferringSubmit(), "ExecuteHeld inside a deferred-submit window");
+
+    m_HeldFenceValue = g_CommandManager.GetQueue(m_Type).ExecuteClosedCommandList(m_CommandList);
+    return m_HeldFenceValue;
+}
+
+void CommandContext::ReleaseHeld(void)
+{
+    ASSERT(m_Held, "ReleaseHeld on a context that is not held");
+
+    m_Held = false;
+    Retire(m_HeldFenceValue);
+    g_ContextManager.FreeContext(this);
 }
 
 CommandContext::CommandContext(D3D12_COMMAND_LIST_TYPE Type) :
@@ -175,6 +262,9 @@ CommandContext::CommandContext(D3D12_COMMAND_LIST_TYPE Type) :
     m_CurComputeRootSignature = nullptr;
     m_CurPipelineState = nullptr;
     m_NumBarriersToFlush = 0;
+
+    m_Held = false;
+    m_HeldFenceValue = 0;
 }
 
 CommandContext::~CommandContext( void )

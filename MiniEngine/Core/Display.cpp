@@ -758,6 +758,12 @@ void Graphics::PreparePresentSDR(void)
 
 void Display::Present(void)
 {
+    Display::PrepareFrame();
+    Display::Flip();
+}
+
+void Display::PrepareFrame(void)
+{
     // VRTF: a refused Recreate leaves no chain AND no display planes, so the whole frame is skipped
     // -- composing into a destroyed plane's RTV would remove the device instead of reporting the
     // refusal the test is measuring.
@@ -768,6 +774,12 @@ void Display::Present(void)
         PreparePresentHDR();
     else
         PreparePresentSDR();
+}
+
+void Display::Flip(void)
+{
+    if (s_SwapChain1 == nullptr)
+        return;
 
     UINT PresentInterval = s_EnableVSync ? std::min(4, (int)Round(s_FrameTime * 60.0f)) : 0;
 

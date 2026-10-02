@@ -32,6 +32,13 @@ namespace Display
     void Resize(uint32_t width, uint32_t height);
     void Present(void);
 
+    // VRTF: Present in two halves, so the composite can be recorded on one thread and the chain
+    // presented from another. PrepareFrame records the composite into the current display plane and
+    // submits it through its context's Finish; Flip presents the chain and advances the frame. Present
+    // is PrepareFrame then Flip.
+    void PrepareFrame(void);
+    void Flip(void);
+
     // VRTF: replaces the live swapchain on the SAME HWND. Returns the DXGI create HRESULT verbatim
     // (`long`, so this header stays windows.h-free) and never asserts it -- a refusal is the
     // observable the recreate gate measures, and it leaves no chain, which makes Present a no-op.
