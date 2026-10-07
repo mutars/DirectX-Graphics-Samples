@@ -53,4 +53,8 @@ namespace DLSS
     // falls back to the stock present path for this and every subsequent frame.
     bool Resolve(CommandContext& Context, ColorBuffer& Output);
 
+    // VRTF: the next `Evaluates` evaluates pass NGX InReset = 1, on top of the one a feature-create
+    // flags. Under alternate-eye rendering each eye has its own feature, so two discard both histories.
+    void RequestHistoryReset(uint32_t Evaluates);
+
 }

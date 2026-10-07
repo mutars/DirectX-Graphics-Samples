@@ -104,6 +104,9 @@ namespace Graphics
     // PresentSource into g_PreDisplayBuffer, invokes the hook so the consumer draws the HUD
     // straight onto it, then runs a profile-neutral final output pass to the display plane.
     void (*g_vrtfDirectTailHook)(GraphicsContext&, ColorBuffer& preDisplay) = nullptr;
+    // VRTF: observation tap (null = stock path). When set, both Prepare paths hand it the composed
+    // display plane, still in RENDER_TARGET, before it goes to the swapchain's Present.
+    void (*g_vrtfComposedPlaneTap)(GraphicsContext&, ColorBuffer& plane) = nullptr;
     uint32_t g_DisplayWidth = 1920;
     uint32_t g_DisplayHeight = 1080;
     ColorBuffer g_PreDisplayBuffer;
@@ -638,6 +641,9 @@ void Graphics::PreparePresentHDR(void)
         CompositeOverlays(Context);
     }
 
+    if (g_vrtfComposedPlaneTap != nullptr)
+        g_vrtfComposedPlaneTap(Context, g_DisplayPlane[g_CurrentBuffer]);
+
     Context.TransitionResource(g_DisplayPlane[g_CurrentBuffer], D3D12_RESOURCE_STATE_PRESENT);
 
     // Close the final context to be executed before frame present.
@@ -749,6 +755,8 @@ void Graphics::PreparePresentSDR(void)
         CompositeOverlays(Context);
     }
 
+    if (g_vrtfComposedPlaneTap != nullptr)
+        g_vrtfComposedPlaneTap(Context, g_DisplayPlane[g_CurrentBuffer]);
 
     Context.TransitionResource(g_DisplayPlane[g_CurrentBuffer], D3D12_RESOURCE_STATE_PRESENT);
 

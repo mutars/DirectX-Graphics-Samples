@@ -57,7 +57,7 @@ namespace DLSS
     static uint32_t s_LastDisplayW = 0;
     static uint32_t s_LastDisplayH = 0;
     static int      s_LastQuality  = -1;
-    static bool     s_NeedsReset   = true;
+    static uint32_t s_ResetEvaluates = 1;
 }
 
 void DLSS::Initialize(void)
@@ -112,6 +112,12 @@ bool DLSS::IsSupported(void)
     return s_Supported;
 }
 
+void DLSS::RequestHistoryReset(uint32_t Evaluates)
+{
+    if (Evaluates > s_ResetEvaluates)
+        s_ResetEvaluates = Evaluates;
+}
+
 void DLSS::GetRenderDimensions(uint32_t DisplayWidth, uint32_t DisplayHeight, uint32_t& RenderWidth, uint32_t& RenderHeight)
 {
 #if defined(VRTF_HAVE_NGX)
@@ -155,7 +161,7 @@ bool DLSS::Resolve(CommandContext& Context, ColorBuffer& Output)
         s_LastDisplayW = displayW;
         s_LastDisplayH = displayH;
         s_LastQuality  = quality;
-        s_NeedsReset   = true;
+        RequestHistoryReset(1);
     }
 
     float jitterX = 0.5f, jitterY = 0.5f;
@@ -196,7 +202,7 @@ bool DLSS::Resolve(CommandContext& Context, ColorBuffer& Output)
                    g_DLSSMotionBuffer.GetResource(),
                    Output.GetResource(),
                    jitterPixX, jitterPixY,
-                   s_NeedsReset ? 1 : 0,
+                   s_ResetEvaluates > 0 ? 1 : 0,
                    1.0f, 1.0f,
                    renderW, renderH))
     {
@@ -205,7 +211,8 @@ bool DLSS::Resolve(CommandContext& Context, ColorBuffer& Output)
         return false;
     }
 
-    s_NeedsReset = false;
+    if (s_ResetEvaluates > 0)
+        --s_ResetEvaluates;
 
     // NGX issues raw D3D12 barriers outside MiniEngine's CommandContext tracking.
     // Re-declare the resources in the states NGX left them for subsequent MiniEngine use.

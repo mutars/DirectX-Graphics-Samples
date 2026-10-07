@@ -38,6 +38,9 @@ namespace TemporalEffects
     ExpVar TemporalSpeedLimit("Graphics/AA/TAA/Speed Limit", 64.0f, 1.0f, 1024.0f, 1.0f);
     BoolVar TriggerReset("Graphics/AA/TAA/Reset", false);
     BoolVar EnableCBR("Graphics/CBR/Enable", false);
+    bool ResolveWithoutTAA = true;
+    bool HoldJitter = false;
+    int ForceJitterIndex = -1;
 
     ComputePSO s_TemporalBlendCS(L"TAA: Temporal Blend CS");
     ComputePSO s_BoundNeighborhoodCS(L"TAA: Bound Neighborhood CS");
@@ -50,6 +53,7 @@ namespace TemporalEffects
     float s_JitterY = 0.5f;
     float s_JitterDeltaX = 0.0f;
     float s_JitterDeltaY = 0.0f;
+    int s_JitterIndex = -1;
 
     void ApplyTemporalAA(ComputeContext& Context);
     void SharpenImage(ComputeContext& Context, ColorBuffer& TemporalColor);
@@ -94,6 +98,28 @@ void TemporalEffects::Update( uint64_t FrameIndex )
         s_VrtfForceJitter = GetEnvironmentVariableA("VRTF_RENDER_JITTER", b, sizeof(b)) > 0 && b[0] == '1' ? 1 : 0;
     }
 
+    // VRTF_JITTER_PER_EYE=1: walk the table at half the frame rate. Under alternate-eye rendering the
+    // frame index's parity is the eye, so the full index gives each eye only the 4 entries of its
+    // parity -- and the base-2 x of those all lies in one half of the pixel. The halved index gives
+    // each eye every entry and both eyes of a pair the same one. Read once; default-off keeps every
+    // existing capture byte-identical.
+    static int s_VrtfJitterPerEye = -1;
+    if (s_VrtfJitterPerEye < 0)
+    {
+        char b[8] = {};
+        s_VrtfJitterPerEye = GetEnvironmentVariableA("VRTF_JITTER_PER_EYE", b, sizeof(b)) > 0 && b[0] == '1' ? 1 : 0;
+    }
+    const uint32_t JitterIndex = s_VrtfJitterPerEye == 1 ? s_FrameIndex / 2 : s_FrameIndex;
+    const int ForcedIndex = ForceJitterIndex;
+    ForceJitterIndex = -1;
+
+    if (HoldJitter)
+    {
+        s_JitterDeltaX = 0.0f;
+        s_JitterDeltaY = 0.0f;
+        return;
+    }
+
     if (EnableTAA || (DLSS::Enable && DLSS::IsSupported()) || s_VrtfForceJitter == 1)// && !DepthOfField::Enable)
     {
         static const float Halton23[8][2] =
@@ -109,10 +135,13 @@ void TemporalEffects::Update( uint64_t FrameIndex )
         // With CBR, having an odd number of jitter positions is good because odd and even
         // frames can both explore all sample positions.  (Also, the least useful sample is
         // the first one, which is exactly centered between four pixels.)
-        if (EnableCBR)
-            Offset = Halton23[s_FrameIndex % 7 + 1];
+        if (ForcedIndex >= 0)
+            s_JitterIndex = ForcedIndex % 8;
+        else if (EnableCBR)
+            s_JitterIndex = (int)(JitterIndex % 7 + 1);
         else
-            Offset = Halton23[s_FrameIndex % 8];
+            s_JitterIndex = (int)(JitterIndex % 8);
+        Offset = Halton23[s_JitterIndex];
 
         s_JitterDeltaX = s_JitterX - Offset[0];
         s_JitterDeltaY = s_JitterY - Offset[1];
@@ -125,6 +154,7 @@ void TemporalEffects::Update( uint64_t FrameIndex )
         s_JitterDeltaY = s_JitterY - 0.5f;
         s_JitterX = 0.5f;
         s_JitterY = 0.5f;
+        s_JitterIndex = -1;
     }
 
 }
@@ -138,6 +168,11 @@ void TemporalEffects::GetJitterOffset( float& JitterX, float& JitterY )
 {
     JitterX = s_JitterX;
     JitterY = s_JitterY;
+}
+
+int TemporalEffects::GetJitterIndex( void )
+{
+    return s_JitterIndex;
 }
 
 void TemporalEffects::ClearHistory( CommandContext& Context )
@@ -158,6 +193,13 @@ void TemporalEffects::ResolveImage( CommandContext& BaseContext )
     ScopedTimer _prof(L"Temporal Resolve", BaseContext);
 
     ComputeContext& Context = BaseContext.GetComputeContext();
+
+    // VRTF: the skipped resolve leaves the velocity buffer where the resolve would have, its last touch.
+    if (!EnableTAA && !ResolveWithoutTAA)
+    {
+        Context.TransitionResource(g_VelocityBuffer, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        return;
+    }
 
     static bool s_EnableTAA = false;
     static bool s_EnableCBR = false;

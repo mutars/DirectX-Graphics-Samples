@@ -23,6 +23,14 @@ namespace TemporalEffects
     // effectively supersample the image.
     extern BoolVar EnableTAA;
 
+    // VRTF: this engine resolves every frame -- history blend plus sharpen -- even with TAA off; false
+    // restores the older engine's skip of the whole resolve while TAA is off. Default true (stock).
+    extern bool ResolveWithoutTAA;
+
+    extern bool HoldJitter;
+
+    extern int ForceJitterIndex;
+
     void Initialize( void );
 
     void Shutdown( void );
@@ -37,6 +45,8 @@ namespace TemporalEffects
     // Jitter values are neutral at 0.5 and vary from [0, 1).  Jittering only occurs when temporal antialiasing
     // is enabled.  You can use these values to jitter your viewport or projection matrix.
     void GetJitterOffset( float& JitterX, float& JitterY );
+
+    int GetJitterIndex( void );
 
     void ClearHistory(CommandContext& Context);
 
