@@ -27,6 +27,12 @@ namespace DLSS
     // mode changes the optimal render resolution returned by GetRenderDimensions.
     extern EnumVar QualityMode;
 
+    void Configure(void);
+
+    int Status(void);
+
+    void SetCameraParameters(float NearClip, float FarClip, float VerticalFov);
+
     // One-time NGX init (device-level). Must run after Graphics::Initialize (needs g_Device) and
     // must NEVER throw: on any failure (non-RTX, driver/SDK missing) it leaves IsSupported()==false
     // so all callers fall back to the stock path. Safe to call once per process.
